@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
 
 # Model checkpoints
 *.pt
@@ -25,3 +26,4 @@ env/
 # IDE specific files
 .vscode/
 .idea/
+
