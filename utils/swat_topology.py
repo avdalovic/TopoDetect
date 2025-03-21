@@ -5,7 +5,7 @@ with detailed component relationships as 1-cells
 
 import numpy as np
 import toponetx as tnx
-from attack_utils import get_attack_indices, get_sensor_subsets, SWAT_SUB_MAP, is_actuator
+from utils.attack_utils import get_attack_indices, get_sensor_subsets, SWAT_SUB_MAP, is_actuator
 
 class SWATComplex:
     def __init__(self):
