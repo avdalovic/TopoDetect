@@ -25,3 +25,7 @@ env/
 .vscode/
 .idea/
 
+# Keep these specific files
+!data/SWAT/README.md
+!data/SWAT/process_SWaT.py
+!data/SWAT/inspection_notebook.ipynb
