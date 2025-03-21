@@ -13,10 +13,8 @@ best_model.pt
 *.log
 swat_training_*
 
-# Data files
-data/
-data/SWAT/
-*.csv
+# Ignore only CSV files in data/SWAT
+data/SWAT/*.csv
 
 # Virtual environment
 venv/
