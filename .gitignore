@@ -15,6 +15,7 @@ swat_training_*
 
 # Ignore only CSV files in data/SWAT
 data/SWAT/*.csv
+data/SWAT/
 
 # Virtual environment
 venv/
