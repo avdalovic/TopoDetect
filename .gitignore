@@ -4,6 +4,13 @@ __pycache__/
 *$py.class
 *.pyc
 
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
 # Model checkpoints
 *.pt
 model_checkpoint_epoch_*
@@ -28,3 +35,12 @@ env/
 !data/SWAT/README.md
 !data/SWAT/process_SWaT.py
 !data/SWAT/inspection_notebook.ipynb
+
+*.pkl
+*.pth
+*.pt
+*.csv
+*.json
+*.jsonl
+*.jsonl.gz
+*.jsonl.tar.gz
