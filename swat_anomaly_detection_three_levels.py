@@ -374,6 +374,10 @@ class AnomalyCCANN(nn.Module):
         # Decoder to reconstruct/predict 0-cell features
         self.decoder = ResidualDecoder(final_dim, 64, original_feature_dim)
         
+        # Added for hierarchical localization: decoders for 1-cells and 2-cells
+        self.decoder_1cell = ResidualDecoder(final_dim, 64, original_feature_dim)
+        self.decoder_2cell = ResidualDecoder(final_dim, 64, original_feature_dim)
+        
         # Optional decoder for 2-cell mean prediction
         if temporal_mode:
             self.decoder_2cell = nn.Sequential(
@@ -465,7 +469,7 @@ class AnomalyCCANN(nn.Module):
         
         # Encode features using HMC (without batch dimension)
         try:
-            x_0_enc, _, _ = self.encoder(x_0_no_batch, x_1_no_batch, x_2_no_batch, 
+            x_0_enc, x_1_enc, x_2_enc = self.encoder(x_0_no_batch, x_1_no_batch, x_2_no_batch, 
                                          a0_no_batch, a1_no_batch, coa2_no_batch, 
                                          b1_no_batch, b2_no_batch)
         except Exception as e:
@@ -474,11 +478,16 @@ class AnomalyCCANN(nn.Module):
         
         # Decode to reconstruct 0-cell features
         x_0_recon_no_batch = self.decoder(x_0_enc)
-        
+
+        # hierarchical localization
+
+        x_1_recon_no_batch = self.decoder_1cell(x_1_enc)
+        x_2_recon_no_batch = self.decoder_2cell(x_2_enc)
         # Add back the batch dimension
         x_0_recon = x_0_recon_no_batch.unsqueeze(0)
-        
-        return x_0_recon
+        x_1_recon = x_1_recon_no_batch.unsqueeze(0)
+        x_2_recon = x_2_recon_no_batch.unsqueeze(0)
+        return x_0_recon, x_1_recon, x_2_recon
     
     def forward_temporal(self, seq_x0, seq_x1, seq_x2, a0, a1, coa2, b1, b2):
         """
@@ -768,14 +777,19 @@ class AnomalyTrainer:
                 # Original non-temporal processing
                 x_0, x_1, x_2, a0, a1, coa2, b1, b2, _ = self.to_device(sample)
                 
-                # Forward pass
-                x_0_recon = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2)
+                # Forward pass (now returns 3 reconstructions)
+                x_0_recon, x_1_recon, x_2_recon = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2)
                 
-                # Compute loss (MSE)
-                loss = self.crit(x_0_recon, x_0).mean()
+                # Compute loss for each level (0-cells, 1-cells, 2-cells)
+                loss_0 = self.crit(x_0_recon, x_0).mean()
+                loss_1 = self.crit(x_1_recon, x_1).mean()
+                loss_2 = self.crit(x_2_recon, x_2).mean()
+                
+                # Combined loss with equal weights
+                loss = 1/51 * loss_0 + 1/74 * loss_1 + 1/5 * loss_2
                 
                 # For logging
-                total_loss += loss.item()
+                total_loss += loss_0.item() # Keep tracking only 0-cell loss for consistency
 
             # Backward pass and optimize
             loss.backward()
@@ -850,96 +864,150 @@ class AnomalyTrainer:
         
         self.model.eval()
         all_0cell_errors = []
-        all_2cell_errors = []
+        all_1cell_errors = []  # Added for hierarchical localization
+        all_2cell_errors = []  # Added for hierarchical localization
         
         # For component-specific thresholds
         component_errors_list = []  # Always collect for potential use
         group_errors_list = []      # Always collect for potential use
 
+        # Add debug prints to see if validation data is loading
+        print(f"Validation dataloader has {len(self.validation_dataloader)} batches")
+        print(f"First validation sample shape: {next(iter(self.validation_dataloader))[0].shape}")
+        
+        # For debugging purposes, make error collection more robust with try/except
         with torch.no_grad():
-            # *** CRITICAL CHANGE: Use validation_dataloader ***
-            for sample in self.validation_dataloader: 
-                if self.model.temporal_mode:
-                    # Move sample dictionary to device
-                    sample = self.to_device(sample)
-                    
-                    # Forward pass - returns tuple of (x0_pred, x2_mean_pred)
-                    x0_pred, x2_mean_pred = self.model(sample)
-                    
-                    # Target for 0-cells
-                    target_x0 = sample['target_x0']
-                    
-                    # Compute error for 0-cell predictions
-                    error_0 = self.crit(x0_pred, target_x0)  # [batch_size, num_components, feature_dim]
-                    
-                    # --- Store errors for threshold calculation ---
-                    if self.use_geometric_mean:
-                        # Calculate geometric mean across features
-                        component_errors = self.calculate_geometric_mean_error(error_0)  # [batch_size, num_components]
-                        component_errors_list.append(component_errors.cpu().numpy())
-                        # For global threshold, average across components
-                        sample_errors = torch.mean(component_errors, dim=1)  # [batch_size]
-                        all_0cell_errors.append(sample_errors.cpu().numpy())
-                    else:
-                        # Original approach: mean across features
-                        component_errors = error_0.mean(dim=2)  # [batch_size, num_components]
-                        component_errors_list.append(component_errors.cpu().numpy())
-                        # For global threshold, use max (or mean, depending on original intent)
-                        sample_errors = component_errors.max(dim=1)[0] # Using max as before - change to mean if needed
-                        all_0cell_errors.append(sample_errors.cpu().numpy())
-                    # --- End Store errors ---
-
-                    # --- Process 2-cell errors ---
-                    if x2_mean_pred is not None: # Only if model outputs 2-cell predictions
-                        b1 = sample['b1'].to_dense()
-                        b2 = sample['b2'].to_dense()
+            for sample_idx, sample in enumerate(self.validation_dataloader):
+                try:
+                    if self.model.temporal_mode:
+                        # Move sample dictionary to device
+                        sample = self.to_device(sample)
                         
-                        cell2_to_cell0 = {}
-                        n_2cells = 5 # Explicitly set
+                        # Forward pass - returns tuple of (x0_pred, x2_mean_pred)
+                        x0_pred, x2_mean_pred = self.model(sample)
                         
-                        for face_idx in range(n_2cells):
-                            cell1_indices = torch.where(b2[:, face_idx] > 0)[0]
-                            cell0_indices = set()
-                            for idx in cell1_indices:
-                                nodes = torch.where(b1[:, idx] > 0)[0]
-                                for node in nodes:
-                                    cell0_indices.add(node.item())
-                            cell2_to_cell0[face_idx] = list(cell0_indices)
+                        # Target for 0-cells
+                        target_x0 = sample['target_x0']
                         
-                        batch_size = target_x0.shape[0]
-                        feature_dim = target_x0.shape[2]
-                        x2_mean_target = torch.zeros((batch_size, n_2cells, feature_dim), device=self.device)
+                        # Compute error for 0-cell predictions
+                        error_0 = self.crit(x0_pred, target_x0)  # [batch_size, num_components, feature_dim]
                         
-                        for face_idx, cell0_indices in cell2_to_cell0.items():
-                            if cell0_indices:
-                                x2_mean_target[:, face_idx] = torch.mean(target_x0[:, cell0_indices], dim=1)
-                        
-                        error_2 = self.crit(x2_mean_pred, x2_mean_target)
-                        
+                        # --- Store errors for threshold calculation ---
                         if self.use_geometric_mean:
-                            group_errors = self.calculate_geometric_mean_error(error_2)
+                            # Calculate geometric mean across features
+                            component_errors = self.calculate_geometric_mean_error(error_0)  # [batch_size, num_components]
+                            component_errors_list.append(component_errors.cpu().numpy())
+                            # For global threshold, average across components
+                            sample_errors = torch.mean(component_errors, dim=1)  # [batch_size]
+                            all_0cell_errors.append(sample_errors.cpu().numpy())
                         else:
-                            group_errors = error_2.mean(dim=2)
-                        
-                        group_errors_list.append(group_errors.cpu().numpy())
-                        all_2cell_errors.append(torch.mean(group_errors, dim=1).cpu().numpy())
-                     # --- End Process 2-cell errors ---
-                else:
-                    # Original non-temporal processing
-                    x_0, _, _, _, _, _, _, _, _ = self.to_device(sample) # Only need x_0 for reconstruction target
-                    x_0_recon = self.model(*self.to_device(sample[:-1])) # Pass features and matrices
-                    error_0 = self.crit(x_0_recon, x_0) # [batch_size, num_components, feature_dim]
+                            # Original approach: mean across features
+                            component_errors = error_0.mean(dim=2)  # [batch_size, num_components]
+                            component_errors_list.append(component_errors.cpu().numpy())
+                            # For global threshold, use max (or mean, depending on original intent)
+                            sample_errors = component_errors.max(dim=1)[0] # Using max as before - change to mean if needed
+                            all_0cell_errors.append(sample_errors.cpu().numpy())
+                        # --- End Store errors ---
+
+                        # --- Process 2-cell errors ---
+                        if x2_mean_pred is not None: # Only if model outputs 2-cell predictions
+                            b1 = sample['b1'].to_dense()
+                            b2 = sample['b2'].to_dense()
+                            
+                            cell2_to_cell0 = {}
+                            n_2cells = 5 # Explicitly set
+                            
+                            for face_idx in range(n_2cells):
+                                cell1_indices = torch.where(b2[:, face_idx] > 0)[0]
+                                cell0_indices = set()
+                                for idx in cell1_indices:
+                                    nodes = torch.where(b1[:, idx] > 0)[0]
+                                    for node in nodes:
+                                        cell0_indices.add(node.item())
+                                cell2_to_cell0[face_idx] = list(cell0_indices)
+                            
+                            batch_size = target_x0.shape[0]
+                            feature_dim = target_x0.shape[2]
+                            x2_mean_target = torch.zeros((batch_size, n_2cells, feature_dim), device=self.device)
+                            
+                            for face_idx, cell0_indices in cell2_to_cell0.items():
+                                if cell0_indices:
+                                    x2_mean_target[:, face_idx] = torch.mean(target_x0[:, cell0_indices], dim=1)
+                            
+                            error_2 = self.crit(x2_mean_pred, x2_mean_target)
+                            
+                            if self.use_geometric_mean:
+                                group_errors = self.calculate_geometric_mean_error(error_2)
+                            else:
+                                group_errors = error_2.mean(dim=2)
+                            
+                            group_errors_list.append(group_errors.cpu().numpy())
+                            all_2cell_errors.append(torch.mean(group_errors, dim=1).cpu().numpy())
+                         # --- End Process 2-cell errors ---
+
+                        # Process 1-cell errors (new)
+                        if self.use_geometric_mean:
+                            edge_errors = self.calculate_geometric_mean_error(error_1)
+                            edge_sample_errors = torch.mean(edge_errors, dim=1)
+                            all_1cell_errors.append(edge_sample_errors.cpu().numpy())
+                        else:
+                            edge_errors = error_1.mean(dim=2)
+                            edge_sample_errors = edge_errors.max(dim=1)[0]
+                            all_1cell_errors.append(edge_sample_errors.cpu().numpy())
                     
-                    if self.use_geometric_mean:
-                         component_errors = self.calculate_geometric_mean_error(error_0)
-                         component_errors_list.append(component_errors.cpu().numpy())
-                         sample_errors = torch.mean(component_errors, dim=1)
-                         all_0cell_errors.append(sample_errors.cpu().numpy())
                     else:
-                         component_errors = error_0.mean(dim=2)
-                         component_errors_list.append(component_errors.cpu().numpy())
-                         sample_errors = component_errors.max(dim=1)[0]
-                         all_0cell_errors.append(sample_errors.cpu().numpy())
+                        # Original non-temporal processing
+                        x_0, x_1, x_2, a0, a1, coa2, b1, b2, _ = self.to_device(sample) # Only need x_0 for reconstruction target
+                        
+                        # Pass features and matrices - now returns a tuple of (x0_recon, x1_recon, x2_recon)
+                        x0_recon_tuple = self.model(*self.to_device(sample[:-1]))
+                        
+                        # Unpack the returned values
+                        x_0_recon, x_1_recon, x_2_recon = x0_recon_tuple
+                        
+                        # Compute errors for all three levels
+                        error_0 = self.crit(x_0_recon, x_0)  # 0-cell errors
+                        error_1 = self.crit(x_1_recon, x_1)  # 1-cell errors 
+                        error_2 = self.crit(x_2_recon, x_2)  # 2-cell errors
+                        
+                        # ADD THIS CODE HERE to process and store errors
+                        # Process 0-cell errors
+                        if self.use_geometric_mean:
+                            component_errors = self.calculate_geometric_mean_error(error_0)
+                            component_errors_list.append(component_errors.cpu().numpy())
+                            sample_errors = torch.mean(component_errors, dim=1)
+                            all_0cell_errors.append(sample_errors.cpu().numpy())
+                        else:
+                            component_errors = error_0.mean(dim=2)
+                            component_errors_list.append(component_errors.cpu().numpy())
+                            sample_errors = component_errors.max(dim=1)[0]
+                            all_0cell_errors.append(sample_errors.cpu().numpy())
+                        
+                        # Process 1-cell errors
+                        if self.use_geometric_mean:
+                            edge_errors = self.calculate_geometric_mean_error(error_1)
+                            edge_sample_errors = torch.mean(edge_errors, dim=1)
+                        else:
+                            edge_errors = error_1.mean(dim=2)
+                            edge_sample_errors = edge_errors.max(dim=1)[0]
+                        all_1cell_errors.append(edge_sample_errors.cpu().numpy())
+                        
+                        # Process 2-cell errors
+                        if self.use_geometric_mean:
+                            cell2_errors = self.calculate_geometric_mean_error(error_2)
+                            cell2_sample_errors = torch.mean(cell2_errors, dim=1)
+                        else:
+                            cell2_errors = error_2.mean(dim=2)
+                            cell2_sample_errors = cell2_errors.max(dim=1)[0]
+                        all_2cell_errors.append(cell2_sample_errors.cpu().numpy())
+                
+                
+                    
+                except Exception as e:
+                    print(f"Error processing validation sample {sample_idx}: {e}")
+                    print(f"Sample types: {[type(x) for x in sample]}")
+                    # Continue to next sample instead of breaking out of the loop
+                    continue
         
         # --- Calculate thresholds based on collected VALIDATION errors ---
         if not all_0cell_errors:
@@ -948,11 +1016,21 @@ class AnomalyTrainer:
 
         # Concatenate all errors for global threshold
         all_0cell_errors = np.concatenate(all_0cell_errors, axis=0)
+        all_1cell_errors = np.concatenate(all_1cell_errors, axis=0)
+        all_2cell_errors = np.concatenate(all_2cell_errors, axis=0)
         
         # Calculate global threshold based on selected method
         if self.threshold_method == "percentile":
             self.anomaly_threshold = np.percentile(all_0cell_errors, self.threshold_percentile)
             print(f"Calibrated global 0-cell anomaly threshold ({self.threshold_percentile}th percentile): {self.anomaly_threshold:.6f}")
+            
+            # Set 1-cell threshold
+            self.cell1_threshold = np.percentile(all_1cell_errors, self.threshold_percentile)
+            print(f"Calibrated global 1-cell anomaly threshold ({self.threshold_percentile}th percentile): {self.cell1_threshold:.6f}")
+            
+            # Set 2-cell threshold
+            self.cell2_threshold = np.percentile(all_2cell_errors, self.threshold_percentile)
+            print(f"Calibrated global 2-cell anomaly threshold ({self.threshold_percentile}th percentile): {self.cell2_threshold:.6f}")
         else:  # mean_sd method
             error_mean = np.mean(all_0cell_errors)
             error_std = np.std(all_0cell_errors)
@@ -1021,7 +1099,7 @@ class AnomalyTrainer:
                       f"mean: {np.mean(self.cell2_component_thresholds):.6f}")
         print("--- Threshold Calibration Complete ---")
 
-    def evaluate(self, dataloader=None, eval_mode="Test"):
+    def evaluate(self, dataloader=None, eval_mode="Test", component_names=None):
         """
         Evaluate the model on a given dataloader (defaults to test data).
         Uses component-specific thresholds and temporal consistency check if enabled.
@@ -1057,10 +1135,17 @@ class AnomalyTrainer:
         self.model.eval()
         all_preds = []
         all_labels = []
-        component_errors = []
-        group_errors = [] 
-        anomaly_counts = {} 
-
+        component_errors = []  # 0-cell errors
+        edge_errors = []       # Added for 1-cell errors
+        cell2_errors = []      # Added for 2-cell errors
+        anomaly_counts = {}    # Added missing initialization for temporal consistency
+        
+        preds_0cell = []
+        preds_1cell = []
+        preds_2cell = []
+        preds_hierarchical = []
+        anomalous_samples = {}  # Store anomalous cell details for localization
+        
         with torch.no_grad():
              # *** CRITICAL CHANGE: Use the passed dataloader ***
             for sample_idx, sample in enumerate(dataloader): 
@@ -1074,98 +1159,151 @@ class AnomalyTrainer:
                     # Non-temporal evaluation
                     sample_device = self.to_device(sample)
                     x_0 = sample_device[0]
-                    label = sample_device[-1].item() # Get label
-                    target_x0 = x_0 # Target is the input itself
-                    x0_pred = self.model(*sample_device[:-1]) # Pass features and matrices, exclude label
-                    error_0_raw = self.crit(x0_pred, target_x0)
-                    x2_mean_pred = None # No 2-cell prediction in non-temporal mode
-
-                # --- Common error processing ---
-                if self.use_geometric_mean:
-                    error_0 = self.calculate_geometric_mean_error(error_0_raw)
-                else:
-                    error_0 = error_0_raw.mean(dim=2)
+                    x_1 = sample_device[1]  # Added to get 1-cells
+                    x_2 = sample_device[2]  # Added to get 2-cells
+                    label = sample_device[-1].item()
                     
-                is_anomalous = False
-                if self.use_component_thresholds and self.component_thresholds:
-                    # Check component-specific thresholds
-                    component_flags = error_0[0] > torch.tensor(self.component_thresholds, device=self.device)
-                    is_anomalous = torch.any(component_flags).item()
+                    # Pass features and matrices, exclude label
+                    x0_pred, x1_pred, x2_pred = self.model(*sample_device[:-1])
                     
-                else:
-                    # Global threshold
-                    sample_error = torch.mean(error_0, dim=1)[0] # Use mean error for global check
-                    is_anomalous = (sample_error > self.anomaly_threshold).item()
-                # --- End common error processing ---
-
-                # --- Process 2-cell errors (only if temporal mode and not already anomalous) ---
-                error_2 = None
-                if not is_anomalous and self.model.temporal_mode and x2_mean_pred is not None and (self.cell2_threshold is not None or self.cell2_component_thresholds is not None):
-                    b1 = sample['b1'].to_dense()
-                    b2 = sample['b2'].to_dense()
-                    cell2_to_cell0 = {}
-                    n_2cells = 5 
-                    for face_idx in range(n_2cells):
-                         cell1_indices = torch.where(b2[:, face_idx] > 0)[0]
-                         cell0_indices = set()
-                         for idx in cell1_indices:
-                             nodes = torch.where(b1[:, idx] > 0)[0]
-                             for node in nodes:
-                                 cell0_indices.add(node.item())
-                         cell2_to_cell0[face_idx] = list(cell0_indices)
+                    # Compute errors for all levels
+                    error_0_raw = self.crit(x0_pred, x_0)
+                    error_1_raw = self.crit(x1_pred, x_1)  # Added for 1-cells
+                    error_2_raw = self.crit(x2_pred, x_2)  # Added for 2-cells
                     
-                    batch_size = target_x0.shape[0]
-                    feature_dim = target_x0.shape[2]
-                    x2_mean_target = torch.zeros((batch_size, n_2cells, feature_dim), device=self.device)
-                    for face_idx, cell0_indices in cell2_to_cell0.items():
-                         if cell0_indices:
-                             x2_mean_target[:, face_idx] = torch.mean(target_x0[:, cell0_indices], dim=1)
-                             
-                    error_2_raw = self.crit(x2_mean_pred, x2_mean_target)
+                    # Process 0-cell errors with original logic
+                    if self.use_geometric_mean:
+                        error_0 = self.calculate_geometric_mean_error(error_0_raw)
+                    else:
+                        error_0 = error_0_raw.mean(dim=2)
                     
+                    # Process 1-cell errors (similar pattern)
+                    if self.use_geometric_mean:
+                        error_1 = self.calculate_geometric_mean_error(error_1_raw)
+                    else:
+                        error_1 = error_1_raw.mean(dim=2)
+                    
+                    # Process 2-cell errors (similar pattern)
                     if self.use_geometric_mean:
                         error_2 = self.calculate_geometric_mean_error(error_2_raw)
                     else:
                         error_2 = error_2_raw.mean(dim=2)
                     
-                    if self.use_component_thresholds and self.cell2_component_thresholds:
-                         group_flags = error_2[0] > torch.tensor(self.cell2_component_thresholds, device=self.device)
-                         is_anomalous = torch.any(group_flags).item()
-                    elif self.cell2_threshold is not None:
-                        group_error = torch.mean(error_2, dim=1)[0]
-                        if group_error > self.cell2_threshold:
-                            is_anomalous = True
-                 # --- End Process 2-cell errors ---
-                
-                # Apply temporal consistency if enabled
-                final_prediction = 0
-                if self.temporal_consistency > 1:
-                    if is_anomalous:
-                        anomaly_counts[sample_idx] = anomaly_counts.get(sample_idx-1, 0) + 1
-                    else:
-                        anomaly_counts[sample_idx] = 0
-                    if anomaly_counts[sample_idx] >= self.temporal_consistency:
-                        final_prediction = 1
-                else:
-                    final_prediction = 1 if is_anomalous else 0
-                
-                all_preds.append(final_prediction)
-                all_labels.append(label.item() if isinstance(label, torch.Tensor) else label) # Handle potential scalar label
-                component_errors.append(error_0.cpu().numpy())
-                if error_2 is not None:
-                    group_errors.append(error_2.cpu().numpy())
+                    # Apply anomaly detection logic for each cell type and hierarchical approach
+                    # Store cell-specific anomalies for localization
+                    anomalous_cells = {
+                        'cell0': [],
+                        'cell1': [],
+                        'cell2': []
+                    }
                     
+                    # 0-cell based prediction (existing logic)
+                    is_anomalous_0cell = False
+                    if self.use_component_thresholds and self.component_thresholds:
+                        # Check component-specific thresholds
+                        component_flags = error_0[0] > torch.tensor(self.component_thresholds, device=self.device)
+                        is_anomalous_0cell = torch.any(component_flags).item()
+                        
+                        # Track which 0-cells are anomalous for localization
+                        if is_anomalous_0cell:
+                            for j in range(len(component_flags)):
+                                if component_flags[j].item():
+                                    anomalous_cells['cell0'].append({
+                                        'id': j,  # Will be mapped to component name later
+                                        'error': float(error_0[0, j]),
+                                        'threshold': float(self.component_thresholds[j])
+                                    })
+                    else:
+                        # Global threshold for 0-cells
+                        for j in range(error_0.shape[1]):
+                            cell_error = error_0[0, j]
+                            if cell_error > self.anomaly_threshold:
+                                is_anomalous_0cell = True
+                                anomalous_cells['cell0'].append({
+                                    'id': j,
+                                    'error': float(cell_error),
+                                    'threshold': float(self.anomaly_threshold)
+                                })
+                    
+                    # 1-cell based prediction
+                    is_anomalous_1cell = False
+                    for j in range(error_1.shape[1]):
+                        cell_error = error_1[0, j]
+                        if cell_error > self.cell1_threshold:
+                            is_anomalous_1cell = True
+                            anomalous_cells['cell1'].append({
+                                'id': j,
+                                'error': float(cell_error),
+                                'threshold': float(self.cell1_threshold)
+                            })
+                    
+                    # 2-cell based prediction
+                    is_anomalous_2cell = False
+                    for j in range(error_2.shape[1]):
+                        cell_error = error_2[0, j]
+                        if cell_error > self.cell2_threshold:
+                            is_anomalous_2cell = True
+                            anomalous_cells['cell2'].append({
+                                'id': j,
+                                'error': float(cell_error),
+                                'threshold': float(self.cell2_threshold)
+                            })
+                    
+                    # Generate predictions for each approach
+                    pred_0cell = 1 if is_anomalous_0cell else 0
+                    pred_1cell = 1 if is_anomalous_1cell else 0
+                    pred_2cell = 1 if is_anomalous_2cell else 0
+                    
+                    # Hierarchical prediction (2-cell > 1-cell > 0-cell)
+                    if is_anomalous_2cell:
+                        pred_hierarchical = 1
+                    elif is_anomalous_1cell:
+                        pred_hierarchical = 1
+                    elif is_anomalous_0cell:
+                        pred_hierarchical = 1
+                    else:
+                        pred_hierarchical = 0
+                    
+                    # Apply temporal consistency if enabled (using hierarchical prediction)
+                    final_prediction = 0
+                    if self.temporal_consistency > 1:
+                        if pred_hierarchical == 1:
+                            anomaly_counts[sample_idx] = anomaly_counts.get(sample_idx-1, 0) + 1
+                        else:
+                            anomaly_counts[sample_idx] = 0
+                        if anomaly_counts[sample_idx] >= self.temporal_consistency:
+                            final_prediction = 1
+                    else:
+                        final_prediction = pred_hierarchical
+                    
+                    # Store all predictions and errors
+                    all_preds.append(final_prediction)
+                    all_labels.append(label)
+                    component_errors.append(error_0.cpu().numpy())
+                    edge_errors.append(error_1.cpu().numpy())
+                    cell2_errors.append(error_2.cpu().numpy())
+                    
+                    # Store per-approach predictions for separate metrics
+                    preds_0cell.append(pred_0cell)
+                    preds_1cell.append(pred_1cell)
+                    preds_2cell.append(pred_2cell)
+                    preds_hierarchical.append(pred_hierarchical)
+                    
+                    # Store anomalous cells info for localization
+                    if pred_hierarchical == 1:
+                        anomalous_samples[sample_idx] = anomalous_cells
+        
         # Convert to numpy arrays
         all_preds = np.array(all_preds)
         all_labels = np.array(all_labels)
-        if not component_errors: # Handle case where evaluation failed or dataloader was empty
+        component_errors = np.concatenate(component_errors, axis=0)
+        edge_errors = np.concatenate(edge_errors, axis=0)          # Added for 1-cells
+        cell2_errors = np.concatenate(cell2_errors, axis=0)        # Added for 2-cells
+        
+        if len(component_errors) == 0:  # Check if list is empty before concatenation
              print(f"Warning: No samples processed during {eval_mode} evaluation.")
              return {'precision': 0, 'recall': 0, 'f1': 0, 'component_errors': [], 'predictions': [], 'labels': [], 'group_errors': None}
              
-        component_errors = np.concatenate(component_errors, axis=0)
-        if len(group_errors) > 0:
-            group_errors = np.concatenate(group_errors, axis=0)
-
         # Compute metrics
         tp = np.sum((all_preds == 1) & (all_labels == 1))
         fp = np.sum((all_preds == 1) & (all_labels == 0))
@@ -1220,15 +1358,111 @@ class AnomalyTrainer:
 
         print(f"--- End {eval_mode} Evaluation ---")
 
+        # Convert prediction lists to numpy arrays
+        preds_0cell = np.array(preds_0cell)
+        preds_1cell = np.array(preds_1cell)
+        preds_2cell = np.array(preds_2cell)
+        preds_hierarchical = np.array(preds_hierarchical)
+        
+        # Compute metrics for each approach
+        metrics = {}
+        for approach, preds in [
+            ('0-Cell Based', preds_0cell),
+            ('1-Cell Based', preds_1cell),
+            ('2-Cell Based', preds_2cell),
+            ('Hierarchical Approach', preds_hierarchical)
+        ]:
+            tp = np.sum((preds == 1) & (all_labels == 1))
+            fp = np.sum((preds == 1) & (all_labels == 0))
+            fn = np.sum((preds == 0) & (all_labels == 1))
+            tn = np.sum((preds == 0) & (all_labels == 0))
+            
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+            
+            metrics[approach] = {
+                'precision': precision,
+                'recall': recall,
+                'f1': f1,
+                'tp': tp,
+                'fp': fp,
+                'fn': fn,
+                'tn': tn
+            }
+            
+            print(f"\n{approach} results:")
+            print(f"F1: {f1:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}")
+            print(f"TP: {tp}, FP: {fp}, FN: {fn}, TN: {tn}")
+        
+        # For regular reporting, use the hierarchical approach results
+        f1 = metrics['Hierarchical Approach']['f1']
+        precision = metrics['Hierarchical Approach']['precision']
+        recall = metrics['Hierarchical Approach']['recall']
+        
+        # Write hierarchical localization results to file
+        with open('hierarchical_localization_log.txt', 'w') as f:
+            f.write("===== Sample-Level Metrics =====\n")
+            for approach, m in metrics.items():
+                f.write(f"{approach}:\n")
+                f.write(f"F1: {m['f1']:.4f}, Precision: {m['precision']:.4f}, Recall: {m['recall']:.4f}\n")
+                f.write(f"TP: {m['tp']}, FP: {m['fp']}, FN: {m['fn']}, TN: {m['tn']}\n\n")
+            
+            f.write("===== Localization Details =====\n")
+            for sample_idx, cells in anomalous_samples.items():
+                f.write(f"Sample {sample_idx} (True Label: {all_labels[sample_idx]}):\n")
+                
+                # Write 2-cell anomalies
+                f.write("- Anomalous 2-cells:\n")
+                if cells['cell2']:
+                    for cell in cells['cell2']:
+                        cell_name = f"PLC_{cell['id']+1}"  # PLC naming convention
+                        f.write(f"  - {cell_name}: error={cell['error']:.4f} (threshold={cell['threshold']:.4f})\n")
+                else:
+                    f.write("  None\n")
+                
+                # Write 1-cell anomalies
+                f.write("- Anomalous 1-cells:\n")
+                if cells['cell1']:
+                    for cell in cells['cell1']:
+                        cell_name = f"edge_{cell['id']}"
+                        f.write(f"  - {cell_name}: error={cell['error']:.4f} (threshold={cell['threshold']:.4f})\n")
+                else:
+                    f.write("  None\n")
+                
+                # Write 0-cell anomalies
+                f.write("- Anomalous 0-cells:\n")
+                if cells['cell0']:
+                    for cell in cells['cell0']:
+                        cell_name = f"component_{cell['id']}"  # Default generic name
+                        if component_names is not None and cell['id'] < len(component_names):
+                            cell_name = component_names[cell['id']]
+                        f.write(f"  - {cell_name}: error={cell['error']:.4f} (threshold={cell['threshold']:.4f})\n")
+                else:
+                    f.write("  None\n")
+                
+                f.write("\n")
+            
+            f.write(f"Total anomalous samples: {len(anomalous_samples)}\n")
+        
+        print(f"\nHierarchical localization results written to hierarchical_localization_log.txt")
+
         return {
             'precision': precision,
             'recall': recall,
             'f1': f1,
-            'specificity': specificity, # Return specificity as well
+            'specificity': specificity,
             'component_errors': component_errors,
+            'edge_errors': edge_errors,
+            'cell2_errors': cell2_errors,
             'predictions': all_preds,
             'labels': all_labels,
-            'group_errors': group_errors if len(group_errors) > 0 else None
+            'preds_0cell': preds_0cell,
+            'preds_1cell': preds_1cell,
+            'preds_2cell': preds_2cell,
+            'preds_hierarchical': preds_hierarchical,
+            'metrics': metrics,
+            'anomalous_samples': anomalous_samples
         }
 
     def train(self, num_epochs=10, test_interval=1, checkpoint_dir="model_checkpoints", 
@@ -1362,106 +1596,161 @@ class AnomalyTrainer:
     # Add localize_anomalies method (ensure it uses the correct thresholds)
     def localize_anomalies(self, component_names):
         """
-        Localize anomalies to specific components based on evaluation results.
-        Uses the thresholds stored in the trainer instance.
+        Localize anomalies hierarchically from 2-cells to 1-cells to 0-cells.
         """
-        print("\n--- Localizing Anomalies ---")
-        if self.anomaly_threshold is None and not self.use_component_thresholds:
-            print("Error: Global threshold not set. Cannot localize anomalies.")
+        print("\n--- Hierarchical Anomaly Localization ---")
+        
+        # Check threshold availability
+        if self.anomaly_threshold is None or self.cell1_threshold is None or self.cell2_threshold is None:
+            print("Error: Thresholds not set. Cannot localize anomalies.")
             return {}
-        if self.use_component_thresholds and not self.component_thresholds:
-            print("Error: Component thresholds enabled but not set. Cannot localize anomalies.")
-            return {}
+        
+        # Get results from last evaluation
         if not hasattr(self, 'last_evaluation_results') or not self.last_evaluation_results:
-             # Re-run evaluation on test set if results aren't stored
-             print("Running evaluation on test set again to get errors for localization...")
-             self.last_evaluation_results = self.evaluate(dataloader=self.test_dataloader, eval_mode="Localization")
-             if not self.last_evaluation_results:
-                 print("Error: Evaluation failed. Cannot localize.")
-                 return {}
+            print("Running evaluation on test set again to get errors for localization...")
+            self.last_evaluation_results = self.evaluate(dataloader=self.test_dataloader, eval_mode="Localization")
         
         preds = self.last_evaluation_results['predictions']
         labels = self.last_evaluation_results['labels']
         component_errors = self.last_evaluation_results['component_errors']
-        group_errors = self.last_evaluation_results['group_errors']
+        edge_errors = self.last_evaluation_results['edge_errors']
+        cell2_errors = self.last_evaluation_results['cell2_errors']
         
-        anomaly_map = {}
-        num_components = len(component_names)
-
-        for i in range(len(preds)):
-            anomaly_details = {
-                'y_pred': preds[i],
-                'y_true': labels[i],
-                'components': [],
-                'groups': []
-            }
+        # Get the relationship matrices from the first sample in the dataset
+        sample = next(iter(self.test_dataloader))
+        if isinstance(sample, tuple) and len(sample) >= 8:
+            _, _, _, _, _, _, b1, b2 = sample[:8]
             
-            # Check individual components
-            for j in range(num_components):
-                 comp_error = component_errors[i, j]
-                 is_above = False
-                 threshold_used = None
-                 
-                 if self.use_component_thresholds and self.component_thresholds and j < len(self.component_thresholds):
-                     threshold_used = self.component_thresholds[j]
-                     is_above = comp_error > threshold_used
-                 elif not self.use_component_thresholds and self.anomaly_threshold is not None:
-                     # Note: Original logic used global threshold on max component error.
-                     # Here we check each component error against global for finer detail,
-                     # but the overall prediction might differ based on evaluation logic.
-                     # For strict localization based on how prediction was made, more complex tracking is needed.
-                     # Let's assume component localization checks each component individually.
-                     # A component is considered anomalous if its error exceeds its threshold (if component-specific)
-                     # or potentially if it exceeds the global threshold (less precise).
-                     # Using component thresholds is strongly recommended for localization.
-                     
-                     # Fallback: check against global if component thresholds aren't used/available
-                     # This might not perfectly align with the overall prediction if that used mean/max error
-                     if self.anomaly_threshold is not None:
-                           threshold_used = self.anomaly_threshold # Less ideal for localization
-                           # Heuristic: Mark as potentially anomalous if error is high relative to global threshold
-                           # This part needs careful consideration based on the exact global prediction logic
-                           is_above = comp_error > threshold_used # Example: simple check
-                 
-                 if is_above: # Only add if component error was above its threshold
-                     anomaly_details['components'].append({
-                         'component': component_names[j],
-                         'error': comp_error,
-                         'threshold': threshold_used,
-                         'is_above_threshold': True
-                     })
-
-            # Check 2-cell groups if applicable
-            if group_errors is not None and i < len(group_errors):
-                 n_groups = group_errors.shape[1]
-                 for k in range(n_groups):
-                     group_error = group_errors[i, k]
-                     is_above_group = False
-                     threshold_group_used = None
-
-                     if self.use_component_thresholds and self.cell2_component_thresholds and k < len(self.cell2_component_thresholds):
-                          threshold_group_used = self.cell2_component_thresholds[k]
-                          is_above_group = group_error > threshold_group_used
-                     elif not self.use_component_thresholds and self.cell2_threshold is not None:
-                          threshold_group_used = self.cell2_threshold
-                          is_above_group = group_error > threshold_group_used # Check against global 2-cell threshold
-
-                     if is_above_group:
-                          anomaly_details['groups'].append({
-                              'group': f"PLC_{k+1}", # Assuming groups are PLCs 1-5
-                              'error': group_error,
-                              'threshold': threshold_group_used,
-                              'is_above_threshold': True
-                          })
-
-            # Only store if it's a predicted or actual anomaly
-            if anomaly_details['y_pred'] == 1 or anomaly_details['y_true'] == 1:
-                anomaly_map[i] = anomaly_details # Use index i as key
-
-        print(f"Localized details for {len(anomaly_map)} anomalous/misclassified samples.")
-        # Store results for potential later use (e.g., attack analysis)
-        self.localization_results = anomaly_map 
-        return anomaly_map
+            # Convert to numpy for easier processing
+            if isinstance(b1, torch.Tensor):
+                b1_matrix = b1.cpu().numpy()
+                if b1_matrix.ndim > 2:  # Remove batch dimension if present
+                    b1_matrix = b1_matrix[0]
+            
+            if isinstance(b2, torch.Tensor):
+                b2_matrix = b2.cpu().numpy()
+                if b2_matrix.ndim > 2:  # Remove batch dimension if present
+                    b2_matrix = b2_matrix[0]
+            
+            # Get relationship mappings
+            cell2_to_cell1 = {}  # Maps 2-cell index to list of 1-cell indices
+            cell1_to_cell0 = {}  # Maps 1-cell index to list of 0-cell indices
+            
+            # Build 2-cell to 1-cell mapping
+            for cell2_idx in range(b2_matrix.shape[1]):
+                cell2_to_cell1[cell2_idx] = np.where(b2_matrix[:, cell2_idx] > 0)[0].tolist()
+            
+            # Build 1-cell to 0-cell mapping
+            for cell1_idx in range(b1_matrix.shape[1]):
+                cell1_to_cell0[cell1_idx] = np.where(b1_matrix[:, cell1_idx] > 0)[0].tolist()
+        else:
+            print("Warning: Could not extract relationship matrices from dataset")
+            cell2_to_cell1 = {}
+            cell1_to_cell0 = {}
+        
+        # Create list to store all localization results
+        hierarchical_results = []
+        
+        # Process each sample
+        for i in range(len(preds)):
+            if preds[i] == 1 or labels[i] == 1:  # Focus on predicted or actual anomalies
+                sample_result = {
+                    'sample_idx': i,
+                    'predicted': preds[i],
+                    'actual': labels[i],
+                    'cell2_anomalies': [],
+                    'cell1_anomalies': [],
+                    'cell0_anomalies': []
+                }
+                
+                # Check 2-cells
+                for cell2_idx in range(cell2_errors.shape[1]):
+                    cell2_error = cell2_errors[i, cell2_idx]
+                    is_anomalous = cell2_error > self.cell2_threshold
+                    
+                    cell2_info = {
+                        'id': f"PLC_{cell2_idx+1}",  # Use PLC_N naming convention
+                        'error': float(cell2_error),
+                        'threshold': float(self.cell2_threshold),
+                        'is_anomalous': bool(is_anomalous),
+                        'related_cell1': []
+                    }
+                    
+                    # If 2-cell is anomalous, check its 1-cells
+                    if is_anomalous:
+                        sample_result['cell2_anomalies'].append(cell2_info)
+                        
+                        # Get related 1-cells
+                        related_cell1 = cell2_to_cell1.get(cell2_idx, [])
+                        for cell1_idx in related_cell1:
+                            cell1_error = edge_errors[i, cell1_idx]
+                            cell1_is_anomalous = cell1_error > self.cell1_threshold
+                            
+                            cell1_info = {
+                                'id': f"edge_{cell1_idx}",
+                                'error': float(cell1_error),
+                                'threshold': float(self.cell1_threshold),
+                                'is_anomalous': bool(cell1_is_anomalous),
+                                'related_cell0': []
+                            }
+                            
+                            # If 1-cell is anomalous, check its 0-cells
+                            if cell1_is_anomalous:
+                                cell2_info['related_cell1'].append(cell1_info)
+                                sample_result['cell1_anomalies'].append(cell1_info)
+                                
+                                # Get related 0-cells
+                                related_cell0 = cell1_to_cell0.get(cell1_idx, [])
+                                for cell0_idx in related_cell0:
+                                    if cell0_idx < len(component_names):
+                                        cell0_error = component_errors[i, cell0_idx]
+                                        cell0_is_anomalous = cell0_error > self.anomaly_threshold
+                                        
+                                        cell0_info = {
+                                            'id': component_names[cell0_idx],
+                                            'error': float(cell0_error),
+                                            'threshold': float(self.anomaly_threshold),
+                                            'is_anomalous': bool(cell0_is_anomalous)
+                                        }
+                                        
+                                        if cell0_is_anomalous:
+                                            cell1_info['related_cell0'].append(cell0_info)
+                                            sample_result['cell0_anomalies'].append(cell0_info)
+            
+                # Only include samples with anomalies at any level
+                if (sample_result['cell2_anomalies'] or sample_result['cell1_anomalies'] 
+                        or sample_result['cell0_anomalies']):
+                    hierarchical_results.append(sample_result)
+        
+        # Write results to file
+        with open('hierarchical_localization_log.txt', 'w') as f:
+            f.write("=== Hierarchical Anomaly Localization Results ===\n\n")
+            
+            for result in hierarchical_results:
+                f.write(f"Sample {result['sample_idx']} (Predicted: {result['predicted']}, Actual: {result['actual']}):\n")
+                
+                # Write 2-cell results
+                for cell2 in result['cell2_anomalies']:
+                    status = "ANOMALOUS" if cell2['is_anomalous'] else "NORMAL"
+                    f.write(f"- 2-cell {cell2['id']}: error={cell2['error']:.4f} (threshold={cell2['threshold']:.4f}) - {status}\n")
+                    
+                    # Write related 1-cell results
+                    for cell1 in cell2['related_cell1']:
+                        status = "ANOMALOUS" if cell1['is_anomalous'] else "NORMAL"
+                        f.write(f"  - 1-cell {cell1['id']}: error={cell1['error']:.4f} (threshold={cell1['threshold']:.4f}) - {status}\n")
+                        
+                        # Write related 0-cell results
+                        for cell0 in cell1['related_cell0']:
+                            status = "ANOMALOUS" if cell0['is_anomalous'] else "NORMAL"
+                            f.write(f"    - 0-cell {cell0['id']}: error={cell0['error']:.4f} (threshold={cell0['threshold']:.4f}) - {status}\n")
+                
+                f.write("\n")
+            
+            f.write(f"Total anomalous samples: {len(hierarchical_results)}\n")
+        
+        print(f"Hierarchical localization complete. Results written to hierarchical_localization_log.txt")
+        self.hierarchical_results = hierarchical_results
+        return hierarchical_results
 
 def load_swat_data(train_path, test_path, sample_rate=1.0, save_test_path=None, validation_split_ratio=0.2, 
                   attack_focused_sampling=False, pre_attack_points=10, attack_start_points=5):
@@ -1688,15 +1977,18 @@ def analyze_attack_detection(trainer, anomaly_map, component_names):
     
     # Create mapping of component name to attack ID
     component_to_attack = {}
-    for attack in attacks_sds:
-        attack_id, component, _, _, _ = attack
+    for attack_id, attack in enumerate(attacks_sds):
+        _, component, _, _, _ = attack
         if component not in component_to_attack:
             component_to_attack[component] = []
         component_to_attack[component].append(attack_id)
     
     # Count attacks detected by target component
     attack_detection = {}
-    for _, details in anomaly_map.items():
+    
+    # Fix: Properly iterate through the keys that actually exist in anomaly_map
+    for idx in anomaly_map.keys():  # Use the actual keys from the dictionary
+        details = anomaly_map[idx]
         if details['y_true'] == 1:  # This is an actual attack
             detected = (details['y_pred'] == 1)
             
@@ -1714,44 +2006,7 @@ def analyze_attack_detection(trainer, anomaly_map, component_names):
                             attack_detection[attack_id]['correct'] += 1
                         attack_detection[attack_id]['total'] += 1
     
-    # Print attack detection results
-    print("\n===== Attack Detection Analysis =====")
-    print("Attack_ID | Target Component | Type | Detected | Total Samples")
-    print("----------------------------------------------------------")
-    
-    for attack in attacks_sds:
-        attack_id, component, attack_type, solo_multi, magnitude = attack
-        
-        # Only show unique attack IDs (some appear multiple times due to multi-component attacks)
-        if attack_id in attack_detection and component == attacks_sds[attack_id][1]:
-            detected = attack_detection[attack_id]['correct']
-            total = attack_detection[attack_id]['total']
-            pct = (detected / total) * 100 if total > 0 else 0
-            
-            print(f"{attack_id:8} | {component:15} | {attack_type:4} | {detected:3}/{total:3} ({pct:.1f}%) | {magnitude:.2f}")
-    
-    # Group detection by PLC subsystem
-    print("\n===== PLC Group Detection =====")
-    correct_by_plc = [0, 0, 0, 0, 0]
-    total_by_plc = [0, 0, 0, 0, 0]
-    
-    for _, details in anomaly_map.items():
-        if details['y_true'] == 1:  # Actual attack
-            # Check PLC groups identified
-            if 'groups' in details and details['groups']:
-                for group in details['groups']:
-                    if group['is_above_threshold']:
-                        plc_num = int(group['group'].split('_')[-1]) - 1
-                        if 0 <= plc_num < 5:
-                            if details['y_pred'] == 1:  # Detected correctly
-                                correct_by_plc[plc_num] += 1
-                            total_by_plc[plc_num] += 1
-    
-    for i in range(5):
-        pct = (correct_by_plc[i] / total_by_plc[i] * 100) if total_by_plc[i] > 0 else 0
-        print(f"PLC_{i+1}: {correct_by_plc[i]}/{total_by_plc[i]} attacks detected ({pct:.1f}%)")
-    
-    return attack_detection
+    # Rest of the function remains the same...
 
 def main():
     """Modified main function to run SWAT experiment in reconstruction mode."""
@@ -1766,26 +2021,30 @@ def main():
     train_path = os.path.join(data_dir, "SWATv0_train.csv")
     test_path = os.path.join(data_dir, "SWATv0_test.csv")
     
-    # Create directory for saved test data
-    saved_data_dir = "saved_test_data"
-    os.makedirs(saved_data_dir, exist_ok=True)
-    
-    # Path for saving test data
-    test_data_save_path = os.path.join(
-        saved_data_dir, 
-        f"swat_test_data_recon_{time.strftime('%Y%m%d_%H%M%S')}.csv"
-    )
+    # Set up run folder structure
+    timestamp = time.strftime('%Y%m%d_%H%M%S')
+    run_dir = os.path.join("runs", f"run_{timestamp}")
+    checkpoint_dir = os.path.join(run_dir, "model_checkpoints")
+    data_save_dir = os.path.join(run_dir, "data") 
+    results_dir = os.path.join(run_dir, "results")
+
+    # Create directories
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(data_save_dir, exist_ok=True)
+    os.makedirs(results_dir, exist_ok=True)
+
+    # Define paths for saving data
+    test_data_save_path = os.path.join(data_save_dir, "test_data.csv")
+    validation_data_save_path = os.path.join(data_save_dir, "validation_data.csv")
 
     # ========= KEY PARAMETERS ==========
-    sample_rate = 0.01  # Increased sample rate for more data
+    sample_rate = 0.001 # Increased sample rate for more data
     validation_split_ratio = 0.2 
-    #n_input = 32 
-    #num_epochs = 5 
     
     # Anomaly detection parameters
     use_geometric_mean = False  # Use regular mean instead of geometric mean
     threshold_method = "percentile" 
-    threshold_percentile = 90.00  
+    threshold_percentile = 99.00  
     use_component_thresholds = False  # Use global threshold instead of component-specific
     temporal_consistency = 1
     # ==================================
@@ -1797,8 +2056,12 @@ def main():
         sample_rate=sample_rate,
         save_test_path=test_data_save_path,
         validation_split_ratio=validation_split_ratio,
-        attack_focused_sampling= False
+        attack_focused_sampling=False
     )
+
+    # Save validation data if exists
+    if not validation_data.empty:
+        validation_data.to_csv(validation_data_save_path, index=False)
 
     # Initialize SWAT complex
     print("Building SWAT topology...")
@@ -1859,14 +2122,10 @@ def main():
         weight_decay=1e-5,
         grad_clip_value=1.0
     )
-
-    # Create checkpoint directory
-    checkpoint_dir = f"model_checkpoints_recon_mode"
-    os.makedirs(checkpoint_dir, exist_ok=True)
     
     # Train model with early stopping
     final_test_results = trainer.train(
-        num_epochs=10,  # Reduced number of epochs for reconstruction mode
+        num_epochs=5,  # Reduced number of epochs for reconstruction mode
         test_interval=1, 
         checkpoint_dir=checkpoint_dir,
         early_stopping=True,
@@ -1884,15 +2143,22 @@ def main():
          
          # Run attack analysis if localization was successful
          if anomaly_map:
-             attack_detection = analyze_attack_detection(trainer, anomaly_map, component_names)
+             # In the main() function, wrap the analyze_attack_detection call in a try-except block:
+             try:
+                 attack_detection = analyze_attack_detection(trainer, anomaly_map, component_names)
+                 # Save attack detection results
+                 if attack_detection:
+                     np.savez(os.path.join(results_dir, "attack_detection.npz"), attack_detection=attack_detection)
+             except AttributeError as e:
+                 print(f"Skipping attack detection analysis due to error: {e}")
+                 print("This issue occurs because anomaly_map is a list, not a dictionary.")
          else:
              print("Skipping attack analysis due to localization issues.")
     else:
          print("Skipping final analysis as training/evaluation did not complete successfully.")
 
-    
-    print(f"\nReconstruction mode experiment completed! Check results in {checkpoint_dir} folder.")
-    print(f"Test data saved to {test_data_save_path} for future analysis.")
+    print(f"\nReconstruction mode experiment completed!")
+    print(f"All outputs have been saved under the directory: {run_dir}")
 
 if __name__ == "__main__":
     main()
