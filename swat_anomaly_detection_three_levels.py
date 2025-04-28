@@ -16,6 +16,7 @@ import time
 import pickle
 import math
 import random 
+import argparse # Add argparse import
 
 class SWaTDataset(Dataset):
     """Dataset class for SWAT anomaly detection."""
@@ -2019,34 +2020,45 @@ def analyze_attack_detection(trainer, anomaly_map, component_names):
     
     # Rest of the function remains the same...
 
-def main():
+def main(args): # Modify main to accept args
     """Modified main function to run SWAT experiment in reconstruction mode."""
     # ========= Reproducibility ==========
-    seed = 42 # You can choose any fixed integer
+    # Use seed from args
+    seed = args.seed
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed) # if using multiple GPUs
+        # Optional: uncomment for more determinism at potential cost of speed
+        # torch.backends.cudnn.deterministic = True
+        # torch.backends.cudnn.benchmark = False
     print(f"Set random seed to {seed} for reproducibility.")
     # ==================================
-    
+
     print("Starting SWAT Anomaly Detection in Reconstruction Mode...")
 
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Set device based on args
+    if args.use_gpu and torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        if args.use_gpu:
+             print("Warning: --use_gpu specified but CUDA not available. Using CPU.")
+        device = torch.device("cpu")
     print(f"Using device: {device}")
 
-    # Define paths
-    data_dir = "data/SWAT"
+
+    # Define paths using args
+    data_dir = args.data_dir
     train_path = os.path.join(data_dir, "SWATv0_train.csv")
     test_path = os.path.join(data_dir, "SWATv0_test.csv")
-    
-    # Set up run folder structure
+
+    # Set up run folder structure using args
     timestamp = time.strftime('%Y%m%d_%H%M%S')
-    run_dir = os.path.join("runs", f"run_{timestamp}")
+    run_dir = os.path.join(args.output_base_dir, f"run_{timestamp}")
     checkpoint_dir = os.path.join(run_dir, "model_checkpoints")
-    data_save_dir = os.path.join(run_dir, "data") 
+    data_save_dir = os.path.join(run_dir, "data")
     results_dir = os.path.join(run_dir, "results")
 
     # Create directories
@@ -2058,26 +2070,29 @@ def main():
     test_data_save_path = os.path.join(data_save_dir, "test_data.csv")
     validation_data_save_path = os.path.join(data_save_dir, "validation_data.csv")
 
-    # ========= KEY PARAMETERS ==========
-    sample_rate = 0.001 # Increased sample rate for more data
-    validation_split_ratio = 0.2 
+    # ========= KEY PARAMETERS from args ==========
+    sample_rate = args.sample_rate
+    validation_split_ratio = args.validation_split
     
-    # Anomaly detection parameters
-    use_geometric_mean = False  # Use regular mean instead of geometric mean
-    threshold_method = "percentile" 
-    threshold_percentile = 99.00  
-    use_component_thresholds = False  # Use global threshold instead of component-specific
-    temporal_consistency = 1
+    # Anomaly detection parameters from args
+    # use_geometric_mean = args.use_geometric_mean # FIX: This should be False, not from args
+    use_geometric_mean = False # Fixed for reconstruction mode
+    threshold_method = args.threshold_method
+    threshold_percentile = args.threshold_percentile
+    sd_multiplier = args.sd_multiplier
+    # use_component_thresholds = args.use_component_thresholds # FIX: This should be False, not from args
+    use_component_thresholds = False # Fixed for reconstruction mode
+    temporal_consistency = 1 # Hardcoded as it's for temporal mode only
     # ==================================
 
     # Load data with validation split and optional attack-focused sampling
     train_data, validation_data, test_data = load_swat_data(
-        train_path, 
-        test_path, 
+        train_path,
+        test_path,
         sample_rate=sample_rate,
         save_test_path=test_data_save_path,
         validation_split_ratio=validation_split_ratio,
-        attack_focused_sampling=False
+        attack_focused_sampling=False # Keep False as we are not using temporal mode focus
     )
 
     # Save validation data if exists
@@ -2108,50 +2123,49 @@ def main():
          print("Error: Validation dataloader could not be created. Check validation_split_ratio.")
          return
 
-    # Define model hyperparameters
-    #lstm_hidden_dim = 64
-    #in_channels = [lstm_hidden_dim, lstm_hidden_dim, lstm_hidden_dim]
+    # Define model hyperparameters (keeping these fixed for now, could be args later)
     in_channels = [3, 3, 3]
     intermediate_channels = [32, 32, 32]
     final_channels = [64, 64, 64]
     channels_per_layer = [[in_channels, intermediate_channels, final_channels]]
 
+
     # Create model in reconstruction mode (temporal_mode=False)
     print("Creating model in reconstruction mode...")
     model = AnomalyCCANN(
-        channels_per_layer, 
+        channels_per_layer,
         original_feature_dim=3,
-        temporal_mode=False  # Set to reconstruction mode
+        temporal_mode=False  # Fixed to reconstruction mode
     )
 
-    # Create trainer with validation dataloader
+    # Create trainer with validation dataloader using args
     print("Creating trainer with validation set for thresholding...")
     trainer = AnomalyTrainer(
         model,
         train_dataloader,
         validation_dataloader,
         test_dataloader,
-        learning_rate=0.005,
+        learning_rate=args.lr, # Use arg
         device=device,
-        threshold_percentile=threshold_percentile,
-        use_geometric_mean=use_geometric_mean,
-        epsilon=1e-6,
-        threshold_method=threshold_method,
-        sd_multiplier=2.5,
-        use_component_thresholds=use_component_thresholds, 
-        temporal_consistency=temporal_consistency,
-        weight_decay=1e-5,
-        grad_clip_value=1.0
+        threshold_percentile=threshold_percentile, # Use arg
+        use_geometric_mean=False, # Fixed based on current usage
+        epsilon=1e-6, # Keep fixed
+        threshold_method=threshold_method, # Use arg
+        sd_multiplier=sd_multiplier, # Use arg
+        use_component_thresholds=False, # Fixed based on current usage
+        temporal_consistency=1, # Fixed
+        weight_decay=args.weight_decay, # Use arg
+        grad_clip_value=args.grad_clip # Use arg
     )
-    
-    # Train model with early stopping
+
+    # Train model with early stopping using args
     final_test_results = trainer.train(
-        num_epochs=5,  # Reduced number of epochs for reconstruction mode
-        test_interval=1, 
+        num_epochs=args.epochs,  # Use arg
+        test_interval=1, # Keep fixed for now
         checkpoint_dir=checkpoint_dir,
-        early_stopping=True,
-        patience=3,
-        min_delta=1e-4
+        early_stopping=True, # Keep fixed True
+        patience=args.patience, # Use arg
+        min_delta=args.min_delta # Use arg
     )
     
     # Localize anomalies using the final model state and thresholds
@@ -2182,4 +2196,35 @@ def main():
     print(f"All outputs have been saved under the directory: {run_dir}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="SWAT Anomaly Detection using CCANN (Reconstruction Mode)")
+
+    # Data Args
+    parser.add_argument('--data_dir', type=str, default='data/SWAT', help='Directory containing SWAT CSV files')
+    parser.add_argument('--output_base_dir', type=str, default='runs', help='Base directory for saving runs, models, and results')
+    parser.add_argument('--sample_rate', type=float, default=0.001, help='Fraction of data to sample (0.0 to 1.0)')
+    parser.add_argument('--validation_split', type=float, default=0.2, help='Fraction of training data to use for validation')
+
+    # Model & Training Args
+    parser.add_argument('--lr', type=float, default=0.005, help='Learning rate')
+    parser.add_argument('--epochs', type=int, default=10, help='Maximum number of training epochs')
+    parser.add_argument('--weight_decay', type=float, default=1e-5, help='Weight decay (L2 penalty)')
+    parser.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping value')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    parser.add_argument('--use_gpu', action='store_true', help='Use GPU if available')
+
+    # Anomaly Detection Args
+    parser.add_argument('--threshold_method', type=str, default='percentile', choices=['percentile', 'mean_sd'], help='Method for threshold calibration')
+    parser.add_argument('--threshold_percentile', type=float, default=99.0, help='Percentile for thresholding (if method is percentile)')
+    parser.add_argument('--sd_multiplier', type=float, default=2.5, help='Multiplier for standard deviation (if method is mean_sd)')
+    # parser.add_argument('--use_component_thresholds', action='store_true', help='Use component-specific thresholds (currently fixed to False)') # Keep commented out as it's fixed
+    # parser.add_argument('--use_geometric_mean', action='store_true', help='Use geometric mean for errors (currently fixed to False)') # Keep commented out as it's fixed
+
+    # Early Stopping Args
+    parser.add_argument('--patience', type=int, default=3, help='Epochs to wait for improvement before early stopping')
+    parser.add_argument('--min_delta', type=float, default=1e-4, help='Minimum change in F1 score to qualify as improvement for early stopping')
+
+    args = parser.parse_args()
+    
+    # Run main function with parsed args
+    main(args)
+
