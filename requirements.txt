@@ -1,0 +1,15 @@
+numpy
+scipy
+matplotlib
+pandas==1.5.3
+networkx
+jupyter
+toponetx
+topomodelx
+torch==2.0.1
+# Note: torch-scatter, torch-sparse, and torch-cluster often need specific versions
+# matching the PyTorch and CUDA version. The commands from the README are recommended:
+# pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.0.1+${CUDA}.html
+# pip install torch-cluster -f https://data.pyg.org/whl/torch-2.0.0+${CUDA}.html
+# Replace ${CUDA} with your CUDA version (e.g., cu117, cu118, or cpu).
+# See https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html
