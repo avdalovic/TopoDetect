@@ -1,4 +1,4 @@
-TopoDetect: A Topological Deep Learning Framework for Anomaly Detection and Triaging in ICS Networks
+#TopoDetect: A Topological Deep Learning Framework for Anomaly Detection and Triaging in ICS Networks
 
 This research project implements a novel approach to anomaly detection in industrial control systems using topological deep learning techniques. The system is evaluated on the SWAT (Secure Water Treatment) dataset.
 
