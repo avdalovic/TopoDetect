@@ -15,6 +15,7 @@ from utils.attack_utils import get_attack_indices, is_actuator, get_attack_sds
 import time
 import pickle
 import math
+import random 
 
 class SWaTDataset(Dataset):
     """Dataset class for SWAT anomaly detection."""
@@ -1884,18 +1885,28 @@ def load_swat_data(train_path, test_path, sample_rate=1.0, save_test_path=None, 
     # --- Manual Train/Validation Split ---
     if validation_split_ratio > 0 and len(initial_train_data) > 1:
         # Ensure reproducibility
-        np.random.seed(42) 
+        #np.random.seed(42) 
 
         # Shuffle indices
-        shuffled_indices = np.random.permutation(initial_train_data.index)
+        #shuffled_indices = np.random.permutation(initial_train_data.index)
         
         # Calculate split point
-        split_idx = int(len(shuffled_indices) * (1 - validation_split_ratio))
+        #split_idx = int(len(initial_train_data) * (1 - validation_split_ratio))
         
         # Get train and validation indices
-        train_indices = shuffled_indices[:split_idx]
-        validation_indices = shuffled_indices[split_idx:]
-        
+        #train_indices = initial_train_data.index[:split_idx]
+        #validation_indices = shuffled_indices[split_idx:]
+        # Calculate split point based on the *current* length (after potential sampling)
+        split_idx = int(len(initial_train_data) * (1 - validation_split_ratio))
+
+        # --- MODIFICATION START ---
+        # Get indices *without* shuffling to preserve order from linspace sampling
+        # This ensures validation set maintains the sequence if sample_rate < 1.0
+        all_indices = initial_train_data.index.to_numpy() # Use current index after sampling
+        train_indices = all_indices[:split_idx]
+        validation_indices = all_indices[split_idx:]
+        print(f"Splitting train data sequentially (no shuffle) for validation.") # Add print statement
+        # --- MODIFICATION END ---
         # Create the dataframes
         train_data = initial_train_data.iloc[train_indices].reset_index(drop=True)
         validation_data = initial_train_data.iloc[validation_indices].reset_index(drop=True)
@@ -2010,6 +2021,16 @@ def analyze_attack_detection(trainer, anomaly_map, component_names):
 
 def main():
     """Modified main function to run SWAT experiment in reconstruction mode."""
+    # ========= Reproducibility ==========
+    seed = 42 # You can choose any fixed integer
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    print(f"Set random seed to {seed} for reproducibility.")
+    # ==================================
+    
     print("Starting SWAT Anomaly Detection in Reconstruction Mode...")
 
     # Set device
@@ -2150,8 +2171,8 @@ def main():
                  if attack_detection:
                      np.savez(os.path.join(results_dir, "attack_detection.npz"), attack_detection=attack_detection)
              except AttributeError as e:
-                 print(f"Skipping attack detection analysis due to error: {e}")
-                 print("This issue occurs because anomaly_map is a list, not a dictionary.")
+                 print(f"Skipping attack detection analysis")
+                 
          else:
              print("Skipping attack analysis due to localization issues.")
     else:
