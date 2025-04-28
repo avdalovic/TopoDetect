@@ -44,3 +44,7 @@ env/
 *.jsonl
 *.jsonl.gz
 *.jsonl.tar.gz
+
+
+swat_anomaly_detection.py
+
