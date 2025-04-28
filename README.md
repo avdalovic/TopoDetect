@@ -51,7 +51,6 @@ python swat_anomaly_detection_three_levels.py \
     --output_base_dir results/experiment1 \
     --sample_rate 0.01 \
     --epochs 20 \
-    --lr 0.002 \
     --threshold_percentile 99.0 \
     --use_gpu
 ```
