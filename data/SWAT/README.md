@@ -1,5 +1,5 @@
 This dataset contains processing for a 6 stage water treatment process, collected from a water plant testbed in Singapore.
-Contains 77 sensors/actuators, and 6 labeled cyber-attacks.
+
 
 Request and download the SWAT dataset from: 
 https://itrust.sutd.edu.sg/itrust-labs_datasets/dataset_info/
