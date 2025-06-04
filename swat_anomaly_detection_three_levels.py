@@ -60,7 +60,15 @@ class SWaTDataset(Dataset):
         self.x_2 = self.compute_initial_x2()
 
         # Calculate effective length based on temporal mode
-        if self.temporal_mode:
+        if self.temporal_mode and hasattr(args,'temporal_sample_rate'):
+            # Subsample data to reduce training cost
+            sample_rate = args.temporal_sample_rate
+            if sample_rate > 1:
+                sampled_indices = list(range(0, len(self.data), sample_rate))
+                self.data = self.data.iloc[sampled_indices].reset_index(drop=True)
+                self.labels = self.labels[::sample_rate]
+                print(f"Applied temporal sampling every {sample_rate} timesteps: {len(self.data)} samples remaining")
+
             self.effective_length = len(self.data) - self.n_input
             print(f"Using temporal mode with sequence length {self.n_input}, effective samples: {self.effective_length}")
         else:
@@ -283,6 +291,8 @@ class SWaTDataset(Dataset):
             
             # Target is the next timestep (t)
             target_x0 = self.x_0[idx+self.n_input]  # [n_nodes, feat_dim]
+            target_x1 = self.x_1[idx+self.n_input]  # [n_edges, feat_dim]
+            target_x2 = self.x_2[idx+self.n_input]  # [n_2cells, feat_dim]
             
             # Label of the target timestep
             label = self.labels[idx+self.n_input]
@@ -292,6 +302,8 @@ class SWaTDataset(Dataset):
                 'seq_x1': seq_x1,
                 'seq_x2': seq_x2,
                 'target_x0': target_x0,
+                'target_x1': target_x1,
+                'target_x2': target_x2,
                 'a0': self.a0,
                 'a1': self.a1,
                 'coa2': self.coa2,
@@ -302,16 +314,16 @@ class SWaTDataset(Dataset):
         else:
             # Original code for single timestep
             return (   
-            self.x_0[idx],
-            self.x_1[idx],
-            self.x_2[idx],
-            self.a0,
-            self.a1,
-            self.coa2,
-            self.b1,
-            self.b2,
-            self.labels[idx]
-        )
+                self.x_0[idx],
+                self.x_1[idx],
+                self.x_2[idx],
+                self.a0,
+                self.a1,
+                self.coa2,
+                self.b1,
+                self.b2,
+                self.labels[idx]
+            )
 
 class ResidualDecoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
@@ -328,6 +340,50 @@ class ResidualDecoder(nn.Module):
     def forward(self, x):
         # Residual connection: output = F(x) + projection(x)
         return self.layers(x) + self.shortcut(x)
+    
+class TemporalConvNet(nn.Module):
+    """
+    Lightweight Temporal Convolutional Network for sequence modeling.
+    Uses causal dilated convolutions to capture temporal patterns.
+    """
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=2, kernel_size=3):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        
+        # First layer
+        self.layers.append(nn.Conv1d(input_dim, hidden_dim, kernel_size, 
+                                   dilation=1, padding=(kernel_size-1)))
+        
+        # Additional layers with increasing dilation
+        for i in range(1, num_layers):
+            dilation = 2 ** i
+            padding = (kernel_size - 1) * dilation
+            self.layers.append(nn.Conv1d(hidden_dim, hidden_dim, kernel_size,
+                                       dilation=dilation, padding=padding))
+        
+        # Final projection
+        self.final_conv = nn.Conv1d(hidden_dim, output_dim, 1)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.1)
+        
+    def forward(self, x):
+        """
+        x: [batch_size, seq_len, input_dim] 
+        Returns: [batch_size, output_dim] (last timestep prediction)
+        """
+        # Transpose to [batch_size, input_dim, seq_len] for Conv1d
+        x = x.transpose(1, 2)
+        
+        for layer in self.layers:
+            x = self.dropout(self.relu(layer(x)))
+            # Causal: remove future information
+            x = x[:, :, :-layer.padding[0]] if layer.padding[0] > 0 else x
+            
+        x = self.final_conv(x)
+        
+        # Return last timestep: [batch_size, output_dim]
+        return x[:, :, -1]
+
 
 class AnomalyCCANN(nn.Module):
     """
@@ -335,7 +391,7 @@ class AnomalyCCANN(nn.Module):
     Uses either an autoencoder approach to reconstruct features, or a temporal approach
     to predict the next timestep's features.
     """
-    def __init__(self, channels_per_layer, original_feature_dim, temporal_mode=False, n_input=10):
+    def __init__(self, channels_per_layer, original_feature_dim, temporal_mode=False, use_tcn=False, n_input=10):
         """
         Initialize the anomaly detection model.
 
@@ -346,12 +402,15 @@ class AnomalyCCANN(nn.Module):
         original_feature_dim : int
             Original feature dimension for 0-cells
         temporal_mode : bool, default=False
-            Whether to use temporal mode with LSTM encoding
+            Whether to use temporal mode LSTM encoding
+        use_tcn : bool, default=False
+            Whether to use TCN for temporal encoding instead of LSTM
         n_input : int, default=10
             Number of input timesteps in temporal mode
         """
         super().__init__()
         self.temporal_mode = temporal_mode
+        self.use_tcn = use_tcn
         self.n_input = n_input
         
         # Original HMC encoder (for message passing between cells)
@@ -362,7 +421,7 @@ class AnomalyCCANN(nn.Module):
         self.final_dim = final_dim
 
         # LSTM for temporal encoding (only used in temporal mode)
-        if temporal_mode:
+        if temporal_mode and not use_tcn:
             self.lstm = nn.LSTM(
                 input_size=original_feature_dim,
                 hidden_size=final_dim,
@@ -373,48 +432,48 @@ class AnomalyCCANN(nn.Module):
             # Variance projection for 2-cells
             self.variance_proj = nn.Linear(original_feature_dim, final_dim)
         
+        #TCN for temporal encoding
+        elif temporal_mode and use_tcn:
+            self.tcn_0 = TemporalConvNet(final_dim, 64, final_dim, num_layers=3, kernel_size=3)
+            self.tcn_1 = TemporalConvNet(final_dim, 64, final_dim, num_layers=3, kernel_size=3)
+            self.tcn_2 = TemporalConvNet(final_dim, 64, final_dim, num_layers=3, kernel_size=3)
         # Decoder to reconstruct/predict 0-cell features
         self.decoder = ResidualDecoder(final_dim, 64, original_feature_dim)
-        
         # Added for hierarchical localization: decoders for 1-cells and 2-cells
         self.decoder_1cell = ResidualDecoder(final_dim, 64, original_feature_dim)
         self.decoder_2cell = ResidualDecoder(final_dim, 64, original_feature_dim)
-        
-        # Optional decoder for 2-cell mean prediction
-        if temporal_mode:
-            self.decoder_2cell = nn.Sequential(
-            nn.Linear(final_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, original_feature_dim)
-        )
 
         print(f"Initialized AnomalyCCANN with encoder output dim {final_dim} and decoder output dim {original_feature_dim}")
         if temporal_mode:
-            print(f"Using temporal mode with sequence length {n_input}")
+            mode_str = 'TCN' if use_tcn else 'LSTM'
+            print(f"Using {mode_str} temporal mode with sequence length {n_input}")
+
 
     def forward(self, *args, **kwargs):
         """
-        Forward pass through the model. Handles both temporal and non-temporal modes.
+        Forward pass through the model. Handles both temporal (LSTM and TCN) and non-temporal modes.
         """
         if self.temporal_mode:
-            # If it's a dictionary input from the dataset's temporal mode
             if isinstance(args[0], dict):
                 batch = args[0]
-                return self.forward_temporal(
-                    batch['seq_x0'], 
-                    batch['seq_x1'], 
-                    batch['seq_x2'], 
-                    batch['a0'], 
-                    batch['a1'], 
-                    batch['coa2'], 
-                    batch['b1'], 
-                    batch['b2']
+                if self.use_tcn:
+                    return self.forward_tcn(
+                        batch['seq_x0'], batch['seq_x1'], batch['seq_x2'],
+                        batch['a0'], batch['a1'], batch['coa2'], 
+                        batch['b1'], batch['b2']
+                    )
+                else:
+                    return self.forward_temporal(
+                        batch['seq_x0'], batch['seq_x1'], batch['seq_x2'], 
+                        batch['a0'], batch['a1'], batch['coa2'], 
+                        batch['b1'], batch['b2']
                 )
-            # If it's individual tensors as arguments
             else:
-                return self.forward_temporal(*args)
+                if self.use_tcn:
+                    return self.forward_tcn(*args)
+                else:
+                    return self.forward_temporal(*args)
         else:
-            # Original non-temporal forward pass
             return self.forward_original(*args)
 
     def forward_original(self, x_0, x_1, x_2, a0, a1, coa2, b1, b2):
@@ -610,6 +669,85 @@ class AnomalyCCANN(nn.Module):
             raise
         
         return x0_preds, x2_means_preds
+    
+    def forward_tcn(self, seq_x0, seq_x1, seq_x2, a0, a1, coa2, b1, b2):
+        """
+        TCN-based temporal forward pass for next-step prediction.
+        
+        Process: 
+        1. Encode each timestep through CC encoder
+        2. Use TCN to predict next latent representation  
+        3. Decode to get next timestep predictions
+        """
+        device = seq_x0.device
+        batch_size = seq_x0.shape[0]  # Should be 1
+        n_input = seq_x0.shape[1] 
+        
+        # Handle sparse matrix dimensions
+        if a0.dim() > 2:
+            a0_2d = a0.to_dense().squeeze(0).to_sparse()
+            a1_2d = a1.to_dense().squeeze(0).to_sparse() 
+            coa2_2d = coa2.to_dense().squeeze(0).to_sparse()
+            b1_2d = b1.to_dense().squeeze(0).to_sparse()
+            b2_2d = b2.to_dense().squeeze(0).to_sparse()
+        else:
+            a0_2d, a1_2d, coa2_2d, b1_2d, b2_2d = a0, a1, coa2, b1, b2
+        
+        # Encode each timestep through CC encoder
+        encoded_sequence_0 = []
+        encoded_sequence_1 = []
+        encoded_sequence_2 = []
+        
+        for t in range(n_input):
+            # Remove batch dim for HMC encoder
+            x0_t = seq_x0[0, t]  # [n_nodes, feat_dim]
+            x1_t = seq_x1[0, t]  # [n_edges, feat_dim] 
+            x2_t = seq_x2[0, t]  # [n_2cells, feat_dim]
+            
+            # Encode timestep t
+            enc_0, enc_1, enc_2 = self.encoder(x0_t, x1_t, x2_t,
+                                              a0_2d, a1_2d, coa2_2d, b1_2d, b2_2d)
+            
+            encoded_sequence_0.append(enc_0)
+            encoded_sequence_1.append(enc_1) 
+            encoded_sequence_2.append(enc_2)
+        
+        # Stack encoded sequences: [batch_size=1, seq_len, feat_dim]
+        enc_seq_0 = torch.stack(encoded_sequence_0).unsqueeze(0)  # [1, n_input, n_nodes, final_dim]
+        enc_seq_1 = torch.stack(encoded_sequence_1).unsqueeze(0)  # [1, n_input, n_edges, final_dim]
+        enc_seq_2 = torch.stack(encoded_sequence_2).unsqueeze(0)  # [1, n_input, n_2cells, final_dim]
+        
+        # Apply TCN to each sequence to predict next timestep latents
+        # Process each node/edge/cell independently
+        n_nodes = enc_seq_0.shape[2]
+        n_edges = enc_seq_1.shape[2] 
+        n_2cells = enc_seq_2.shape[2]
+        
+        # Predict next 0-cell latents
+        pred_latent_0 = torch.zeros(n_nodes, self.final_dim, device=device)
+        for i in range(n_nodes):
+            node_seq = enc_seq_0[0, :, i, :]  # [n_input, final_dim]
+            pred_latent_0[i] = self.tcn_0(node_seq.unsqueeze(0))  # [1, final_dim] -> [final_dim]
+        
+        # Predict next 1-cell latents  
+        pred_latent_1 = torch.zeros(n_edges, self.final_dim, device=device)
+        for i in range(n_edges):
+            edge_seq = enc_seq_1[0, :, i, :]  # [n_input, final_dim]
+            pred_latent_1[i] = self.tcn_1(edge_seq.unsqueeze(0))
+            
+        # Predict next 2-cell latents
+        pred_latent_2 = torch.zeros(n_2cells, self.final_dim, device=device) 
+        for i in range(n_2cells):
+            cell_seq = enc_seq_2[0, :, i, :]  # [n_input, final_dim]
+            pred_latent_2[i] = self.tcn_2(cell_seq.unsqueeze(0))
+        
+        # Decode predictions
+        pred_x0 = self.decoder(pred_latent_0).unsqueeze(0)      # [1, n_nodes, feat_dim]
+        pred_x1 = self.decoder_1cell(pred_latent_1).unsqueeze(0)  # [1, n_edges, feat_dim]
+        pred_x2 = self.decoder_2cell(pred_latent_2).unsqueeze(0)  # [1, n_2cells, feat_dim]
+        
+        return pred_x0, pred_x1, pred_x2
+    
 
 class AnomalyTrainer:
     """
@@ -718,63 +856,82 @@ class AnomalyTrainer:
                 # Move sample dictionary to device
                 sample = self.to_device(sample)
                 
-                # Forward pass - returns tuple of (x0_pred, x2_mean_pred)
-                x0_pred, x2_mean_pred = self.model(sample)
-                
-                # Target for 0-cells (batch size is guaranteed to be 1)
-                target_x0 = sample['target_x0']
-                
-                # Compute loss for 0-cell predictions
-                loss_0 = self.crit(x0_pred, target_x0).mean()
-                
-                # Compute 2-cell mean targets and loss
-                # Extract 0-cells in each 2-cell using b1 and b2 matrices
-                if sample['b1'].dim() > 2:
-                    b1 = sample['b1'].to_dense().squeeze(0)
-                    b2 = sample['b2'].to_dense().squeeze(0)
+                # Forward pass - returns tuple of predictions
+                if self.model.use_tcn:
+                    #TCN returns predictions for all three levels
+                    x0_pred, x1_pred, x2_pred = self.model(sample)
+                    #Targets for all three levels
+                    target_x0 = sample['target_x0']
+                    target_x1 = sample['target_x1']
+                    target_x2 = sample['target_x2']
+
+                    # Compute loss for each level
+                    loss_0 = self.crit(x0_pred, target_x0).mean()
+                    loss_1 = self.crit(x1_pred, target_x1).mean()
+                    loss_2 = self.crit(x2_pred, target_x2).mean()
+
+                    # Combined loss with equal weights
+                    loss = 1/51 * loss_0 + 1/74 * loss_1 + 1/5 * loss_2
+                    
+                    total_loss += loss_0.item()
                 else:
-                    b1 = sample['b1'].to_dense()
-                    b2 = sample['b2'].to_dense()
+                    # Original LSTM temporal logic unchanged 
+                    x0_pred, x2_mean_pred = self.model(sample)
                 
-                # Find all 0-cells for each 2-cell
-                cell2_to_cell0 = {}
+                    # Target for 0-cells (batch size is guaranteed to be 1)
+                    target_x0 = sample['target_x0']
                 
-                # Use the correct dimension for n_2cells: 5 PLCs (2-cells)
-                n_2cells = 5  # Explicitly set to 5 for the 5 PLCs (2-cells)
+                    # Compute loss for 0-cell predictions
+                    loss_0 = self.crit(x0_pred, target_x0).mean()
                 
-                for face_idx in range(n_2cells):
-                    # Get 1-cells in this 2-cell
-                    cell1_indices = torch.where(b2[:, face_idx] > 0)[0]
+                    # Compute 2-cell mean targets and loss
+                    # Extract 0-cells in each 2-cell using b1 and b2 matrices
+                    if sample['b1'].dim() > 2:
+                        b1 = sample['b1'].to_dense().squeeze(0)
+                        b2 = sample['b2'].to_dense().squeeze(0)
+                    else:
+                        b1 = sample['b1'].to_dense()
+                        b2 = sample['b2'].to_dense()
+                
+                    # Find all 0-cells for each 2-cell
+                    cell2_to_cell0 = {}
+                
+                    # Use the correct dimension for n_2cells: 5 PLCs (2-cells)
+                    n_2cells = 5  # Explicitly set to 5 for the 5 PLCs (2-cells)
+                
+                    for face_idx in range(n_2cells):
+                        # Get 1-cells in this 2-cell
+                        cell1_indices = torch.where(b2[:, face_idx] > 0)[0]
                     
-                    # Get 0-cells connected to these 1-cells
-                    cell0_indices = set()
-                    for idx in cell1_indices:
-                        nodes = torch.where(b1[:, idx] > 0)[0]
-                        for node in nodes:
-                            cell0_indices.add(node.item())
+                        # Get 0-cells connected to these 1-cells
+                        cell0_indices = set()
+                        for idx in cell1_indices:
+                            nodes = torch.where(b1[:, idx] > 0)[0]
+                            for node in nodes:
+                                cell0_indices.add(node.item())
                     
-                    cell2_to_cell0[face_idx] = list(cell0_indices)
+                        cell2_to_cell0[face_idx] = list(cell0_indices)
                 
-                # Compute mean target for each 2-cell
-                batch_size = target_x0.shape[0]
-                feature_dim = target_x0.shape[2]
+                    # Compute mean target for each 2-cell
+                    batch_size = target_x0.shape[0]
+                    feature_dim = target_x0.shape[2]
                 
-                # Initialize tensor for 2-cell mean targets with correct shape [1, 5, 3]
-                x2_mean_target = torch.zeros((batch_size, n_2cells, feature_dim), device=self.device)
+                    # Initialize tensor for 2-cell mean targets with correct shape [1, 5, 3]
+                    x2_mean_target = torch.zeros((batch_size, n_2cells, feature_dim), device=self.device)
                 
-                for face_idx, cell0_indices in cell2_to_cell0.items():
-                    if cell0_indices:
-                        # Mean of all 0-cells in this 2-cell
-                        x2_mean_target[:, face_idx] = torch.mean(target_x0[:, cell0_indices], dim=1)
+                    for face_idx, cell0_indices in cell2_to_cell0.items():
+                        if cell0_indices:
+                            # Mean of all 0-cells in this 2-cell
+                            x2_mean_target[:, face_idx] = torch.mean(target_x0[:, cell0_indices], dim=1)
                 
-                # Compute error for 2-cell mean predictions
-                loss_2 = self.crit(x2_mean_pred, x2_mean_target).mean()
+                    # Compute error for 2-cell mean predictions
+                    loss_2 = self.crit(x2_mean_pred, x2_mean_target).mean()
                 
-                # Combined loss (with weight for 2-cell loss)
-                loss = loss_0 + 0.5 * loss_2
+                    # Combined loss (with weight for 2-cell loss)
+                    loss = loss_0 + 0.5 * loss_2
                 
-                # For logging
-                total_loss += loss_0.item()  # Track only 0-cell loss for consistency
+                    # For logging
+                    total_loss += loss_0.item()  # Track only 0-cell loss for consistency
             else:
                 # Original non-temporal processing
                 x_0, x_1, x_2, a0, a1, coa2, b1, b2, _ = self.to_device(sample)
@@ -875,7 +1032,16 @@ class AnomalyTrainer:
 
         # Add debug prints to see if validation data is loading
         print(f"Validation dataloader has {len(self.validation_dataloader)} batches")
-        print(f"First validation sample shape: {next(iter(self.validation_dataloader))[0].shape}")
+        # FIX: Handle both temporal and non-temporal modes for debug print
+        try:
+            sample = next(iter(self.validation_dataloader))
+            if self.model.temporal_mode:
+                print(f"First validation sample keys: {list(sample.keys())}")
+                print(f"First validation sample seq_x0 shape: {sample['seq_x0'].shape}")
+            else:
+                print(f"First validation sample shape: {sample[0].shape}")
+        except Exception as e:
+            print(f"Could not get sample shape info: {e}")
         
         # For debugging purposes, make error collection more robust with try/except
         with torch.no_grad():
@@ -885,59 +1051,87 @@ class AnomalyTrainer:
                         # Move sample dictionary to device
                         sample = self.to_device(sample)
                         
-                        # Forward pass - returns tuple of (x0_pred, x2_mean_pred)
-                        x0_pred, x2_mean_pred = self.model(sample)
-                        
-                        # Target for 0-cells
-                        target_x0 = sample['target_x0']
-                        
-                        # Compute error for 0-cell predictions
-                        error_0 = self.crit(x0_pred, target_x0)  # [batch_size, num_components, feature_dim]
-                        
-                        # --- Store errors for threshold calculation ---
-                        if self.use_geometric_mean:
-                            # Calculate geometric mean across features
-                            component_errors = self.calculate_geometric_mean_error(error_0)  # [batch_size, num_components]
-                            component_errors_list.append(component_errors.cpu().numpy())
-                            # For global threshold, average across components
-                            sample_errors = torch.mean(component_errors, dim=1)  # [batch_size]
-                            all_0cell_errors.append(sample_errors.cpu().numpy())
+                        # FIX: Handle both LSTM and TCN temporal modes
+                        if self.model.use_tcn:
+                            # TCN returns (x0_pred, x1_pred, x2_pred)
+                            x0_pred, x1_pred, x2_pred = self.model(sample)
+                            
+                            # Targets for all levels
+                            target_x0 = sample['target_x0']
+                            target_x1 = sample['target_x1']
+                            target_x2 = sample['target_x2']
+                            
+                            # Compute errors for all levels
+                            error_0 = self.crit(x0_pred, target_x0)
+                            error_1 = self.crit(x1_pred, target_x1)
+                            error_2 = self.crit(x2_pred, target_x2)
                         else:
-                            # Original approach: mean across features
-                            component_errors = error_0.mean(dim=2)  # [batch_size, num_components]
-                            component_errors_list.append(component_errors.cpu().numpy())
-                            # For global threshold, use max (or mean, depending on original intent)
-                            sample_errors = component_errors.max(dim=1)[0] # Using max as before - change to mean if needed
-                            all_0cell_errors.append(sample_errors.cpu().numpy())
-                        # --- End Store errors ---
+                            # LSTM returns (x0_pred, x2_mean_pred)
+                            x0_pred, x2_mean_pred = self.model(sample)
+                            
+                            # Target for 0-cells
+                            target_x0 = sample['target_x0']
+                            
+                            # Compute error for 0-cell predictions
+                            error_0 = self.crit(x0_pred, target_x0)
+                            
+                            # Initialize error_1 for consistency
+                            error_1 = None
+                            
+                            # Process 2-cell errors for LSTM mode
+                            if x2_mean_pred is not None:
+                                b1 = sample['b1'].to_dense().squeeze(0) if sample['b1'].dim() > 2 else sample['b1'].to_dense()
+                                b2 = sample['b2'].to_dense().squeeze(0) if sample['b2'].dim() > 2 else sample['b2'].to_dense()
+                                
+                                cell2_to_cell0 = {}
+                                n_2cells = 5
+                                
+                                for face_idx in range(n_2cells):
+                                    cell1_indices = torch.where(b2[:, face_idx] > 0)[0]
+                                    cell0_indices = set()
+                                    for idx in cell1_indices:
+                                        nodes = torch.where(b1[:, idx] > 0)[0]
+                                        for node in nodes:
+                                            cell0_indices.add(node.item())
+                                    cell2_to_cell0[face_idx] = list(cell0_indices)
+                                
+                                batch_size = target_x0.shape[0]
+                                feature_dim = target_x0.shape[2]
+                                x2_mean_target = torch.zeros((batch_size, n_2cells, feature_dim), device=self.device)
+                                
+                                for face_idx, cell0_indices in cell2_to_cell0.items():
+                                    if cell0_indices:
+                                        x2_mean_target[:, face_idx] = torch.mean(target_x0[:, cell0_indices], dim=1)
+                                
+                                error_2 = self.crit(x2_mean_pred, x2_mean_target)
+                            else:
+                                error_2 = None
+                            
+                            # Process 0-cell errors
+                            if self.use_geometric_mean:
+                                component_errors = self.calculate_geometric_mean_error(error_0)
+                                component_errors_list.append(component_errors.cpu().numpy())
+                                sample_errors = torch.mean(component_errors, dim=1)
+                                all_0cell_errors.append(sample_errors.cpu().numpy())
+                            else:
+                                component_errors = error_0.mean(dim=2)
+                                component_errors_list.append(component_errors.cpu().numpy())
+                                sample_errors = component_errors.max(dim=1)[0]
+                                all_0cell_errors.append(sample_errors.cpu().numpy())
 
-                        # --- Process 2-cell errors ---
-                        if x2_mean_pred is not None: # Only if model outputs 2-cell predictions
-                            b1 = sample['b1'].to_dense()
-                            b2 = sample['b2'].to_dense()
-                            
-                            cell2_to_cell0 = {}
-                            n_2cells = 5 # Explicitly set
-                            
-                            for face_idx in range(n_2cells):
-                                cell1_indices = torch.where(b2[:, face_idx] > 0)[0]
-                                cell0_indices = set()
-                                for idx in cell1_indices:
-                                    nodes = torch.where(b1[:, idx] > 0)[0]
-                                    for node in nodes:
-                                        cell0_indices.add(node.item())
-                                cell2_to_cell0[face_idx] = list(cell0_indices)
-                            
-                            batch_size = target_x0.shape[0]
-                            feature_dim = target_x0.shape[2]
-                            x2_mean_target = torch.zeros((batch_size, n_2cells, feature_dim), device=self.device)
-                            
-                            for face_idx, cell0_indices in cell2_to_cell0.items():
-                                if cell0_indices:
-                                    x2_mean_target[:, face_idx] = torch.mean(target_x0[:, cell0_indices], dim=1)
-                            
-                            error_2 = self.crit(x2_mean_pred, x2_mean_target)
-                            
+                        # Process 1-cell errors (only for TCN)
+                        if error_1 is not None:
+                            if self.use_geometric_mean:
+                                edge_errors = self.calculate_geometric_mean_error(error_1)
+                                edge_sample_errors = torch.mean(edge_errors, dim=1)
+                                all_1cell_errors.append(edge_sample_errors.cpu().numpy())
+                            else:
+                                edge_errors = error_1.mean(dim=2)
+                                edge_sample_errors = edge_errors.max(dim=1)[0]
+                                all_1cell_errors.append(edge_sample_errors.cpu().numpy())
+                        
+                        # Process 2-cell errors
+                        if error_2 is not None:
                             if self.use_geometric_mean:
                                 group_errors = self.calculate_geometric_mean_error(error_2)
                             else:
@@ -945,17 +1139,6 @@ class AnomalyTrainer:
                             
                             group_errors_list.append(group_errors.cpu().numpy())
                             all_2cell_errors.append(torch.mean(group_errors, dim=1).cpu().numpy())
-                         # --- End Process 2-cell errors ---
-
-                        # Process 1-cell errors (new)
-                        if self.use_geometric_mean:
-                            edge_errors = self.calculate_geometric_mean_error(error_1)
-                            edge_sample_errors = torch.mean(edge_errors, dim=1)
-                            all_1cell_errors.append(edge_sample_errors.cpu().numpy())
-                        else:
-                            edge_errors = error_1.mean(dim=2)
-                            edge_sample_errors = edge_errors.max(dim=1)[0]
-                            all_1cell_errors.append(edge_sample_errors.cpu().numpy())
                     
                     else:
                         # Original non-temporal processing
@@ -972,39 +1155,40 @@ class AnomalyTrainer:
                         error_1 = self.crit(x_1_recon, x_1)  # 1-cell errors 
                         error_2 = self.crit(x_2_recon, x_2)  # 2-cell errors
                         
-                        # ADD THIS CODE HERE to process and store errors
-                        # Process 0-cell errors
-                        if self.use_geometric_mean:
-                            component_errors = self.calculate_geometric_mean_error(error_0)
-                            component_errors_list.append(component_errors.cpu().numpy())
-                            sample_errors = torch.mean(component_errors, dim=1)
-                            all_0cell_errors.append(sample_errors.cpu().numpy())
-                        else:
-                            component_errors = error_0.mean(dim=2)
-                            component_errors_list.append(component_errors.cpu().numpy())
-                            sample_errors = component_errors.max(dim=1)[0]
-                            all_0cell_errors.append(sample_errors.cpu().numpy())
+                    # ADD THIS CODE HERE to process and store errors
+                    # Process 0-cell errors
+                    if self.use_geometric_mean:
+                        component_errors = self.calculate_geometric_mean_error(error_0)
+                        component_errors_list.append(component_errors.cpu().numpy())
+                        sample_errors = torch.mean(component_errors, dim=1)
+                        all_0cell_errors.append(sample_errors.cpu().numpy())
+                    else:
+                        component_errors = error_0.mean(dim=2)
+                        component_errors_list.append(component_errors.cpu().numpy())
+                        sample_errors = component_errors.max(dim=1)[0]
+                        all_0cell_errors.append(sample_errors.cpu().numpy())
                         
-                        # Process 1-cell errors
-                        if self.use_geometric_mean:
-                            edge_errors = self.calculate_geometric_mean_error(error_1)
-                            edge_sample_errors = torch.mean(edge_errors, dim=1)
-                        else:
-                            edge_errors = error_1.mean(dim=2)
-                            edge_sample_errors = edge_errors.max(dim=1)[0]
+                    # Process 1-cell errors
+                    if self.use_geometric_mean:
+                        edge_errors = self.calculate_geometric_mean_error(error_1)
+                        edge_sample_errors = torch.mean(edge_errors, dim=1)
+                        all_1cell_errors.append(edge_sample_errors.cpu().numpy())
+                    else:
+                        edge_errors = error_1.mean(dim=2)
+                        edge_sample_errors = edge_errors.max(dim=1)[0]
                         all_1cell_errors.append(edge_sample_errors.cpu().numpy())
                         
-                        # Process 2-cell errors
-                        if self.use_geometric_mean:
-                            cell2_errors = self.calculate_geometric_mean_error(error_2)
-                            cell2_sample_errors = torch.mean(cell2_errors, dim=1)
-                        else:
-                            cell2_errors = error_2.mean(dim=2)
-                            cell2_sample_errors = cell2_errors.max(dim=1)[0]
+                    # Process 2-cell errors
+                    if self.use_geometric_mean:
+                        cell2_errors = self.calculate_geometric_mean_error(error_2)
+                        cell2_sample_errors = torch.mean(cell2_errors, dim=1)
+                        all_2cell_errors.append(cell2_sample_errors.cpu().numpy())
+                    else:
+                        cell2_errors = error_2.mean(dim=2)
+                        cell2_sample_errors = cell2_errors.max(dim=1)[0]
                         all_2cell_errors.append(cell2_sample_errors.cpu().numpy())
                 
                 
-                    
                 except Exception as e:
                     print(f"Error processing validation sample {sample_idx}: {e}")
                     print(f"Sample types: {[type(x) for x in sample]}")
@@ -1013,37 +1197,69 @@ class AnomalyTrainer:
         
         # --- Calculate thresholds based on collected VALIDATION errors ---
         if not all_0cell_errors:
-             print("Warning: No errors collected during threshold calibration. Cannot set thresholds.")
-             return
+            print("Warning: No errors collected during threshold calibration. Cannot set thresholds.")
+            return
 
         # Concatenate all errors for global threshold
         all_0cell_errors = np.concatenate(all_0cell_errors, axis=0)
-        all_1cell_errors = np.concatenate(all_1cell_errors, axis=0)
-        all_2cell_errors = np.concatenate(all_2cell_errors, axis=0)
+        
+        # Handle case where 1-cell errors might be empty (LSTM mode)
+        if len(all_1cell_errors) > 0:  # FIX: Check length instead of truthiness
+            all_1cell_errors = np.concatenate(all_1cell_errors, axis=0)
+        else:
+            all_1cell_errors = None
+            
+        if len(all_2cell_errors) > 0:  # FIX: Check length instead of truthiness
+            all_2cell_errors = np.concatenate(all_2cell_errors, axis=0)
+        else:
+            all_2cell_errors = None
         
         # Calculate global threshold based on selected method
         if self.threshold_method == "percentile":
             self.anomaly_threshold = np.percentile(all_0cell_errors, self.threshold_percentile)
             print(f"Calibrated global 0-cell anomaly threshold ({self.threshold_percentile}th percentile): {self.anomaly_threshold:.6f}")
             
-            # Set 1-cell threshold
-            self.cell1_threshold = np.percentile(all_1cell_errors, self.threshold_percentile)
-            print(f"Calibrated global 1-cell anomaly threshold ({self.threshold_percentile}th percentile): {self.cell1_threshold:.6f}")
+            if all_1cell_errors is not None:
+                self.cell1_threshold = np.percentile(all_1cell_errors, self.threshold_percentile)
+                print(f"Calibrated global 1-cell anomaly threshold ({self.threshold_percentile}th percentile): {self.cell1_threshold:.6f}")
+            else:
+                self.cell1_threshold = 0.0
+                print("No 1-cell errors collected, setting threshold to 0.0")
             
-            # Set 2-cell threshold
-            self.cell2_threshold = np.percentile(all_2cell_errors, self.threshold_percentile)
-            print(f"Calibrated global 2-cell anomaly threshold ({self.threshold_percentile}th percentile): {self.cell2_threshold:.6f}")
+            if all_2cell_errors is not None:
+                self.cell2_threshold = np.percentile(all_2cell_errors, self.threshold_percentile)
+                print(f"Calibrated global 2-cell anomaly threshold ({self.threshold_percentile}th percentile): {self.cell2_threshold:.6f}")
+            else:
+                self.cell2_threshold = 0.0
+                print("No 2-cell errors collected, setting threshold to 0.0")
         else:  # mean_sd method
             error_mean = np.mean(all_0cell_errors)
             error_std = np.std(all_0cell_errors)
             self.anomaly_threshold = error_mean + self.sd_multiplier * error_std
             print(f"Calibrated global 0-cell anomaly threshold (mean+{self.sd_multiplier}×SD): {self.anomaly_threshold:.6f}")
             print(f"Error distribution - Mean: {error_mean:.6f}, SD: {error_std:.6f}")
+            
+            if all_1cell_errors is not None:
+                error1_mean = np.mean(all_1cell_errors)
+                error1_std = np.std(all_1cell_errors)
+                self.cell1_threshold = error1_mean + self.sd_multiplier * error1_std
+                print(f"Calibrated global 1-cell anomaly threshold (mean+{self.sd_multiplier}×SD): {self.cell1_threshold:.6f}")
+            else:
+                self.cell1_threshold = 0.0
+                print("No 1-cell errors collected, setting threshold to 0.0")
+                
+            if all_2cell_errors is not None:
+                error2_mean = np.mean(all_2cell_errors)
+                error2_std = np.std(all_2cell_errors)
+                self.cell2_threshold = error2_mean + self.sd_multiplier * error2_std
+                print(f"Calibrated global 2-cell anomaly threshold (mean+{self.sd_multiplier}×SD): {self.cell2_threshold:.6f}")
+            else:
+                self.cell2_threshold = 0.0
+                print("No 2-cell errors collected, setting threshold to 0.0")
         
         # Calculate component-specific thresholds if enabled
-        if self.use_component_thresholds and component_errors_list:
+        if self.use_component_thresholds and len(component_errors_list) > 0:  # FIX: Check length
             component_errors_array = np.concatenate(component_errors_list, axis=0)
-            # Compute per-component thresholds
             self.component_thresholds = []
             
             n_components = component_errors_array.shape[1]
@@ -1053,7 +1269,7 @@ class AnomalyTrainer:
                 component_error = component_errors_array[:, i]
                 if self.threshold_method == "percentile":
                     threshold = np.percentile(component_error, self.threshold_percentile)
-                else:  # mean_sd method
+                else:
                     mean = np.mean(component_error)
                     std = np.std(component_error)
                     threshold = mean + self.sd_multiplier * std
@@ -1063,42 +1279,6 @@ class AnomalyTrainer:
                   f"max: {max(self.component_thresholds):.6f}, "
                   f"mean: {np.mean(self.component_thresholds):.6f}")
         
-        # Calculate 2-cell thresholds if applicable
-        if self.model.temporal_mode and all_2cell_errors:
-            all_2cell_errors = np.concatenate(all_2cell_errors, axis=0)
-            
-            # Global 2-cell threshold
-            if self.threshold_method == "percentile":
-                self.cell2_threshold = np.percentile(all_2cell_errors, self.threshold_percentile)
-                print(f"Calibrated global 2-cell anomaly threshold ({self.threshold_percentile}th percentile): {self.cell2_threshold:.6f}")
-            else:  # mean_sd method
-                error2_mean = np.mean(all_2cell_errors)
-                error2_std = np.std(all_2cell_errors)
-                self.cell2_threshold = error2_mean + self.sd_multiplier * error2_std
-                print(f"Calibrated global 2-cell anomaly threshold (mean+{self.sd_multiplier}×SD): {self.cell2_threshold:.6f}")
-                print(f"2-cell error distribution - Mean: {error2_mean:.6f}, SD: {error2_std:.6f}")
-            
-            # Component-specific 2-cell thresholds if enabled
-            if self.use_component_thresholds and group_errors_list:
-                group_errors_array = np.concatenate(group_errors_list, axis=0)
-                self.cell2_component_thresholds = []
-                
-                n_groups = group_errors_array.shape[1]
-                print(f"Calculating component-specific 2-cell thresholds for {n_groups} groups...")
-                
-                for i in range(n_groups):
-                    group_error = group_errors_array[:, i]
-                    if self.threshold_method == "percentile":
-                        threshold = np.percentile(group_error, self.threshold_percentile)
-                    else:  # mean_sd method
-                        mean = np.mean(group_error)
-                        std = np.std(group_error)
-                        threshold = mean + self.sd_multiplier * std
-                    self.cell2_component_thresholds.append(threshold)
-                
-                print(f"2-cell thresholds - min: {min(self.cell2_component_thresholds):.6f}, "
-                      f"max: {max(self.cell2_component_thresholds):.6f}, "
-                      f"mean: {np.mean(self.cell2_component_thresholds):.6f}")
         print("--- Threshold Calibration Complete ---")
 
     def evaluate(self, dataloader=None, eval_mode="Test", component_names=None):
@@ -1117,12 +1297,11 @@ class AnomalyTrainer:
             dataloader = self.test_dataloader
             
         if self.anomaly_threshold is None:
-             print(f"Warning: Threshold not calibrated before {eval_mode} evaluation. Calibrating now...")
-             self.calibrate_threshold()
-             if self.anomaly_threshold is None: # Check again after trying calibration
-                 print(f"Error: Threshold calibration failed. Cannot proceed with {eval_mode} evaluation.")
-                 return {'precision': 0, 'recall': 0, 'f1': 0, 'component_errors': [], 'predictions': [], 'labels': [], 'group_errors': None}
-
+            print(f"Warning: Threshold not calibrated before {eval_mode} evaluation. Calibrating now...")
+            self.calibrate_threshold()
+            if self.anomaly_threshold is None: # Check again after trying calibration
+                print(f"Error: Threshold calibration failed. Cannot proceed with {eval_mode} evaluation.")
+                return {'precision': 0, 'recall': 0, 'f1': 0, 'component_errors': [], 'predictions': [], 'labels': [], 'group_errors': None}
 
         print(f"\n--- Evaluating Model on {eval_mode} Data ({len(dataloader.dataset)} samples) ---")
         error_type = "geometric mean" if self.use_geometric_mean else "mean"
@@ -1130,7 +1309,7 @@ class AnomalyTrainer:
         if self.use_component_thresholds:
             print(f"Using component-specific thresholds")
             if not self.component_thresholds:
-                 print("Warning: Component thresholds enabled but not calculated.")
+                print("Warning: Component thresholds enabled but not calculated.")
         if self.temporal_consistency > 1:
             print(f"Requiring {self.temporal_consistency} consecutive anomalies for detection")
         
@@ -1149,14 +1328,162 @@ class AnomalyTrainer:
         anomalous_samples = {}  # Store anomalous cell details for localization
         
         with torch.no_grad():
-             # *** CRITICAL CHANGE: Use the passed dataloader ***
+            # *** CRITICAL CHANGE: Use the passed dataloader ***
             for sample_idx, sample in enumerate(dataloader): 
                 if self.model.temporal_mode:
                     sample = self.to_device(sample)
-                    x0_pred, x2_mean_pred = self.model(sample)
-                    target_x0 = sample['target_x0']
-                    label = sample['label']
-                    error_0_raw = self.crit(x0_pred, target_x0)
+                    
+                    # FIX: Handle both LSTM and TCN temporal modes (same as calibrate_threshold)
+                    if self.model.use_tcn:
+                        # TCN returns (x0_pred, x1_pred, x2_pred)
+                        x0_pred, x1_pred, x2_pred = self.model(sample)
+                        target_x0 = sample['target_x0']
+                        target_x1 = sample['target_x1']
+                        target_x2 = sample['target_x2']
+                        label = sample['label'].cpu().item()  # FIX: Convert CUDA tensor to Python scalar
+                        
+                        # Compute errors for all levels
+                        error_0_raw = self.crit(x0_pred, target_x0)
+                        error_1_raw = self.crit(x1_pred, target_x1)
+                        error_2_raw = self.crit(x2_pred, target_x2)
+                        
+                        # Process errors with original logic
+                        if self.use_geometric_mean:
+                            error_0 = self.calculate_geometric_mean_error(error_0_raw)
+                            error_1 = self.calculate_geometric_mean_error(error_1_raw)
+                            error_2 = self.calculate_geometric_mean_error(error_2_raw)
+                        else:
+                            error_0 = error_0_raw.mean(dim=2)
+                            error_1 = error_1_raw.mean(dim=2)
+                            error_2 = error_2_raw.mean(dim=2)
+                            
+                        # Apply anomaly detection logic for each cell type and hierarchical approach
+                        # Store cell-specific anomalies for localization
+                        anomalous_cells = {
+                            'cell0': [],
+                            'cell1': [],
+                            'cell2': []
+                        }
+                        
+                        # 0-cell based prediction (existing logic)
+                        is_anomalous_0cell = False
+                        if self.use_component_thresholds and self.component_thresholds:
+                            # Check component-specific thresholds
+                            component_flags = error_0[0] > torch.tensor(self.component_thresholds, device=self.device)
+                            is_anomalous_0cell = torch.any(component_flags).item()
+                            
+                            # Track which 0-cells are anomalous for localization
+                            if is_anomalous_0cell:
+                                for j in range(len(component_flags)):
+                                    if component_flags[j].item():
+                                        anomalous_cells['cell0'].append({
+                                            'id': j,  # Will be mapped to component name later
+                                            'error': float(error_0[0, j]),
+                                            'threshold': float(self.component_thresholds[j])
+                                        })
+                        else:
+                            # Global threshold for 0-cells
+                            for j in range(error_0.shape[1]):
+                                cell_error = error_0[0, j]
+                                if cell_error > self.anomaly_threshold:
+                                    is_anomalous_0cell = True
+                                    anomalous_cells['cell0'].append({
+                                        'id': j,
+                                        'error': float(cell_error),
+                                        'threshold': float(self.anomaly_threshold)
+                                    })
+                        
+                        # 1-cell based prediction
+                        is_anomalous_1cell = False
+                        for j in range(error_1.shape[1]):
+                            cell_error = error_1[0, j]
+                            if cell_error > self.cell1_threshold:
+                                is_anomalous_1cell = True
+                                anomalous_cells['cell1'].append({
+                                    'id': j,
+                                    'error': float(cell_error),
+                                    'threshold': float(self.cell1_threshold)
+                                })
+                        
+                        # 2-cell based prediction
+                        is_anomalous_2cell = False
+                        for j in range(error_2.shape[1]):
+                            cell_error = error_2[0, j]
+                            if cell_error > self.cell2_threshold:
+                                is_anomalous_2cell = True
+                                anomalous_cells['cell2'].append({
+                                    'id': j,
+                                    'error': float(cell_error),
+                                    'threshold': float(self.cell2_threshold)
+                                })
+                        
+                        # Generate predictions for each approach
+                        pred_0cell = 1 if is_anomalous_0cell else 0
+                        pred_1cell = 1 if is_anomalous_1cell else 0
+                        pred_2cell = 1 if is_anomalous_2cell else 0
+                        
+                        # Hierarchical prediction (2-cell > 1-cell > 0-cell)
+                        if is_anomalous_2cell:
+                            pred_hierarchical = 1
+                        elif is_anomalous_1cell:
+                            pred_hierarchical = 1
+                        elif is_anomalous_0cell:
+                            pred_hierarchical = 1
+                        else:
+                            pred_hierarchical = 0
+                        
+                        # Apply temporal consistency if enabled (using hierarchical prediction)
+                        final_prediction = 0
+                        if self.temporal_consistency > 1:
+                            if pred_hierarchical == 1:
+                                anomaly_counts[sample_idx] = anomaly_counts.get(sample_idx-1, 0) + 1
+                            else:
+                                anomaly_counts[sample_idx] = 0
+                            if anomaly_counts[sample_idx] >= self.temporal_consistency:
+                                final_prediction = 1
+                        else:
+                            final_prediction = pred_hierarchical
+                        
+                        # Store all predictions and errors
+                        all_preds.append(final_prediction)
+                        all_labels.append(label)  # Now label is a Python scalar, not CUDA tensor
+                        component_errors.append(error_0.cpu().numpy())
+                        edge_errors.append(error_1.cpu().numpy())
+                        cell2_errors.append(error_2.cpu().numpy())
+                        
+                        # Store per-approach predictions for separate metrics
+                        preds_0cell.append(pred_0cell)
+                        preds_1cell.append(pred_1cell)
+                        preds_2cell.append(pred_2cell)
+                        preds_hierarchical.append(pred_hierarchical)
+                        
+                        # Store anomalous cells info for localization
+                        if pred_hierarchical == 1:
+                            anomalous_samples[sample_idx] = anomalous_cells
+                    else:
+                        # LSTM mode (original temporal code)
+                        x0_pred, x2_mean_pred = self.model(sample)
+                        target_x0 = sample['target_x0']
+                        label = sample['label'].cpu().item()  # FIX: Convert CUDA tensor to Python scalar
+                        error_0_raw = self.crit(x0_pred, target_x0)
+                        
+                        # Basic temporal evaluation logic for LSTM
+                        if self.use_geometric_mean:
+                            error_0 = self.calculate_geometric_mean_error(error_0_raw)
+                        else:
+                            error_0 = error_0_raw.mean(dim=2)
+                        
+                        is_anomalous = torch.any(error_0[0] > self.anomaly_threshold).item()
+                        all_preds.append(1 if is_anomalous else 0)
+                        all_labels.append(label)  # Now label is a Python scalar, not CUDA tensor
+                        component_errors.append(error_0.cpu().numpy())
+                        edge_errors.append(np.zeros((1, 74)))  # Placeholder
+                        cell2_errors.append(np.zeros((1, 5)))  # Placeholder
+                        
+                        preds_0cell.append(1 if is_anomalous else 0)
+                        preds_1cell.append(0)
+                        preds_2cell.append(0)
+                        preds_hierarchical.append(1 if is_anomalous else 0)
                 else:
                     # Non-temporal evaluation
                     sample_device = self.to_device(sample)
@@ -1303,8 +1630,8 @@ class AnomalyTrainer:
         cell2_errors = np.concatenate(cell2_errors, axis=0)        # Added for 2-cells
         
         if len(component_errors) == 0:  # Check if list is empty before concatenation
-             print(f"Warning: No samples processed during {eval_mode} evaluation.")
-             return {'precision': 0, 'recall': 0, 'f1': 0, 'component_errors': [], 'predictions': [], 'labels': [], 'group_errors': None}
+            print(f"Warning: No samples processed during {eval_mode} evaluation.")
+            return {'precision': 0, 'recall': 0, 'f1': 0, 'component_errors': [], 'predictions': [], 'labels': [], 'group_errors': None}
              
         # Compute metrics
         tp = np.sum((all_preds == 1) & (all_labels == 1))
@@ -1319,7 +1646,7 @@ class AnomalyTrainer:
 
         # Report additional metrics on component thresholds
         if self.use_component_thresholds and self.component_thresholds:
-             # *** Restored Code Block ***
+            # *** Restored Code Block ***
             anomalous_components = np.zeros(component_errors.shape[1])
             # Ensure component_errors exists and is not empty before iterating
             if component_errors.size > 0: 
@@ -1332,14 +1659,14 @@ class AnomalyTrainer:
                 print("\nComponent-level anomaly distribution:")
                 # Check if anomalous_components has any counts before sorting
                 if np.any(anomalous_components > 0):
-                     top_components = np.argsort(anomalous_components)[::-1][:5] # Show top 5
-                     for i in top_components:
-                         print(f"Component {i}: {anomalous_components[i]} anomalies")
+                    top_components = np.argsort(anomalous_components)[::-1][:5] # Show top 5
+                    for i in top_components:
+                        print(f"Component {i}: {anomalous_components[i]} anomalies")
                 else:
-                     print("No components exceeded their individual thresholds.")
+                    print("No components exceeded their individual thresholds.")
             else:
-                 print("Warning: Cannot report component-level distribution as component_errors is empty.")
-             # *** End Restored Code Block ***
+                print("Warning: Cannot report component-level distribution as component_errors is empty.")
+            # *** End Restored Code Block ***
 
         print(f"{eval_mode} results with {error_type} errors:")
         print(f"F1: {f1:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, Specificity: {specificity:.4f}")
@@ -1347,16 +1674,16 @@ class AnomalyTrainer:
         
         # Report temporal consistency effect
         if self.temporal_consistency > 1:
-             # *** Restored Code Block ***
+            # *** Restored Code Block ***
             # Count how many anomalies were filtered by temporal consistency
             # Ensure anomaly_counts is not empty before processing
             if anomaly_counts:
-                 raw_anomalies = np.sum(np.array(list(anomaly_counts.values())) > 0)
-                 filtered_anomalies = np.sum(all_preds)
-                 print(f"Temporal consistency filtered out {raw_anomalies - filtered_anomalies} of {raw_anomalies} potential anomalies ({filtered_anomalies} remain)")
+                raw_anomalies = np.sum(np.array(list(anomaly_counts.values())) > 0)
+                filtered_anomalies = np.sum(all_preds)
+                print(f"Temporal consistency filtered out {raw_anomalies - filtered_anomalies} of {raw_anomalies} potential anomalies ({filtered_anomalies} remain)")
             else:
-                 print("Temporal consistency: No anomaly counts recorded.")
-             # *** End Restored Code Block ***
+                print("Temporal consistency: No anomaly counts recorded.")
+            # *** End Restored Code Block ***
 
         print(f"--- End {eval_mode} Evaluation ---")
 
@@ -1486,7 +1813,7 @@ class AnomalyTrainer:
         patience : int, default=3
             Number of epochs to wait for improvement before stopping
         min_delta : float, default=1e-4
-            Minimum change in test F1 to qualify as improvement
+            Minimum change in test F1 to qualify as improvement for early stopping
         """
         print(f"\n--- Starting Training for {num_epochs} epochs ---")
         print(f"Calibrating thresholds on validation set every {test_interval} epochs.")
@@ -2037,7 +2364,26 @@ def main(args): # Modify main to accept args
     print(f"Set random seed to {seed} for reproducibility.")
     # ==================================
 
-    print("Starting SWAT Anomaly Detection in Reconstruction Mode...")
+    # Check if temporal mode is used
+    temporal_mode = args.temporal_mode
+    use_tcn = args.use_tcn and temporal_mode
+    n_input = args.n_input
+    temporal_sample_rate = args.temporal_sample_rate
+
+    #Validation
+    if use_tcn and not temporal_mode:
+        print("Warning: --use_tcn requires --temporal_mode. Ignoring TCN flag.")
+        use_tcn = False
+
+    if not temporal_mode:
+        print("Warning: --temporal_mode is not set. Using reconstruction mode.")
+        temporal_mode = False
+
+    # Print the parameter
+    if not temporal_mode:
+        print("Starting SWAT Anomaly Detection in Reconstruction Mode...")
+    else:
+        print("Starting SWAT Anomaly Detection in Temporal Mode...")
 
     # Set device based on args
     if args.use_gpu and torch.cuda.is_available():
@@ -2053,12 +2399,12 @@ def main(args): # Modify main to accept args
     data_dir = args.data_dir
     train_path = os.path.join(data_dir, "SWATv0_train.csv")
     test_path = os.path.join(data_dir, "SWATv0_test.csv")
-
+    
     # Set up run folder structure using args
     timestamp = time.strftime('%Y%m%d_%H%M%S')
     run_dir = os.path.join(args.output_base_dir, f"run_{timestamp}")
     checkpoint_dir = os.path.join(run_dir, "model_checkpoints")
-    data_save_dir = os.path.join(run_dir, "data")
+    data_save_dir = os.path.join(run_dir, "data") 
     results_dir = os.path.join(run_dir, "results")
 
     # Create directories
@@ -2087,8 +2433,8 @@ def main(args): # Modify main to accept args
 
     # Load data with validation split and optional attack-focused sampling
     train_data, validation_data, test_data = load_swat_data(
-        train_path,
-        test_path,
+        train_path, 
+        test_path, 
         sample_rate=sample_rate,
         save_test_path=test_data_save_path,
         validation_split_ratio=validation_split_ratio,
@@ -2107,10 +2453,10 @@ def main(args): # Modify main to accept args
     component_names = [col for col in train_data.columns if col not in ['Timestamp', 'Normal/Attack']]
 
     # Create datasets with reconstruction mode (temporal_mode=False)
-    print("Creating datasets (train, validation, test) in reconstruction mode...")
-    train_dataset = SWaTDataset(train_data, swat_complex, temporal_mode=False)
-    validation_dataset = SWaTDataset(validation_data, swat_complex, temporal_mode=False) if not validation_data.empty else None
-    test_dataset = SWaTDataset(test_data, swat_complex, temporal_mode=False)
+    print(f"Creating datasets in {'TCN temporal' if use_tcn else 'temporal' if temporal_mode else 'reconstruction'} mode")
+    train_dataset = SWaTDataset(train_data, swat_complex, temporal_mode=temporal_mode,n_input=n_input)
+    validation_dataset = SWaTDataset(validation_data, swat_complex, temporal_mode=temporal_mode,n_input=n_input) if not validation_data.empty else None
+    test_dataset = SWaTDataset(test_data, swat_complex, temporal_mode=temporal_mode,n_input=n_input)
 
     # Create dataloaders
     batch_size = 1
@@ -2133,9 +2479,11 @@ def main(args): # Modify main to accept args
     # Create model in reconstruction mode (temporal_mode=False)
     print("Creating model in reconstruction mode...")
     model = AnomalyCCANN(
-        channels_per_layer,
+        channels_per_layer, 
         original_feature_dim=3,
-        temporal_mode=False  # Fixed to reconstruction mode
+        temporal_mode=temporal_mode,
+        n_input=n_input,
+        use_tcn=use_tcn
     )
 
     # Create trainer with validation dataloader using args
@@ -2157,7 +2505,7 @@ def main(args): # Modify main to accept args
         weight_decay=args.weight_decay, # Use arg
         grad_clip_value=args.grad_clip # Use arg
     )
-
+    
     # Train model with early stopping using args
     final_test_results = trainer.train(
         num_epochs=args.epochs,  # Use arg
@@ -2197,6 +2545,15 @@ def main(args): # Modify main to accept args
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SWAT Anomaly Detection using CCANN (Reconstruction Mode)")
+
+    parser.add_argument('--temporal_mode', action='store_true', 
+                   help='Use temporal prediction mode instead of reconstruction')
+    parser.add_argument('--use_tcn', action='store_true',
+                   help='Use TCN for temporal modeling (requires --temporal_mode)')
+    parser.add_argument('--n_input', type=int, default=10, 
+                   help='Number of input timesteps for temporal mode')
+    parser.add_argument('--temporal_sample_rate', type=int, default=1,
+                   help='Sample every N timesteps to reduce temporal training cost (e.g., 2 for every 2s)')
 
     # Data Args
     parser.add_argument('--data_dir', type=str, default='data/SWAT', help='Directory containing SWAT CSV files')
