@@ -1,0 +1,156 @@
+import copy
+import torch
+from torch import nn
+from topomodelx.nn.combinatorial.hmc import HMC
+
+from src.models.common import ResidualDecoder, TemporalConvNet
+
+
+class AnomalyCCANN(nn.Module):
+    """
+    Anomaly detection model using Combinatorial Complex Attention Neural Network.
+    Uses either an autoencoder approach to reconstruct features, or a temporal approach
+    to predict the next timestep's features.
+    """
+    def __init__(self, channels_per_layer, original_feature_dim, temporal_mode=False, use_tcn=False, n_input=10):
+        """
+        Initialize the anomaly detection model.
+        """
+        super().__init__()
+        self.temporal_mode = temporal_mode
+        self.use_tcn = use_tcn
+        self.n_input = n_input
+        
+        if self.temporal_mode:
+            # In temporal mode, an LSTM/TCN first encodes the sequence.
+            # The output of the temporal model becomes the input to the HMC encoder.
+            self.lstm_hidden_dim = channels_per_layer[-1][-1][-1]  # Use final HMC channel size as LSTM hidden size
+            
+            # Create a new channel configuration for the HMC encoder to accept LSTM's output
+            encoder_channels = copy.deepcopy(channels_per_layer)
+            encoder_channels[0][0] = [self.lstm_hidden_dim] * 3  # HMC input must match LSTM hidden dim
+
+            self.encoder = HMC(
+                channels_per_layer=encoder_channels
+            )
+            print(f"Initialized AnomalyCCANN with LSTM->HMC architecture. LSTM hidden: {self.lstm_hidden_dim}")
+
+            if self.use_tcn:
+                # This path is not fully implemented for the new architecture yet
+                print(f"Using TCN temporal mode with sequence length {n_input}")
+                self.tcn_x0 = TemporalConvNet(input_dim=original_feature_dim, hidden_dim=self.lstm_hidden_dim*2, output_dim=self.lstm_hidden_dim)
+            else:
+                print(f"Using LSTM temporal mode with sequence length {n_input}")
+                # LSTMs to encode the original features over time
+                self.lstm_encoder_x0 = nn.LSTM(input_size=original_feature_dim, hidden_size=self.lstm_hidden_dim, batch_first=True)
+                self.lstm_encoder_x1 = nn.LSTM(input_size=original_feature_dim, hidden_size=self.lstm_hidden_dim, batch_first=True)
+                self.lstm_encoder_x2 = nn.LSTM(input_size=original_feature_dim, hidden_size=self.lstm_hidden_dim, batch_first=True)
+            
+            # Decoders map from HMC's output dimension back to original feature dimension
+            decoder_input_dim = channels_per_layer[-1][-1][-1]
+            self.decoder_x0 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_input_dim, output_dim=original_feature_dim)
+            self.decoder_x2 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_input_dim, output_dim=original_feature_dim)
+
+        else: # Reconstruction mode
+            print(f"Using reconstruction mode")
+            self.encoder = HMC(
+                channels_per_layer=channels_per_layer
+            )
+            encoder_output_dim = channels_per_layer[-1][-1][-1]
+            # Restore all three decoders for hierarchical reconstruction
+            self.decoder_x0 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dim)
+            self.decoder_x1 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dim)
+            self.decoder_x2 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dim)
+
+    def forward(self, *args, **kwargs):
+        # Correctly dispatch based on the mode
+        if self.temporal_mode:
+            # In temporal mode, we expect a single dictionary argument.
+            sample = args[0] if args else kwargs
+            return self.forward_temporal(
+                sample['x_0'], sample['x_1'], sample['x_2'],
+                sample['a0'], sample['a1'], sample['coa2'],
+                sample['b1'], sample['b2']
+                )
+        else:
+            # In reconstruction mode, we expect positional arguments. Pass them through.
+            return self.forward_original(*args, **kwargs)
+
+    def forward_original(self, x_0_batch, x_1_batch, x_2_batch, a0, a1, coa2, b1, b2):
+        """
+        Batched forward pass for reconstruction mode.
+        This loops through the batch because the underlying topomodelx layers do not
+        support batched tensor inputs.
+        """
+        batch_size = x_0_batch.shape[0]
+
+        # Get static 2D topology matrices. If they have a batch dim, take the first item.
+        a0_static = a0[0] if a0.dim() > 2 else a0
+        a1_static = a1[0] if a1.dim() > 2 else a1
+        coa2_static = coa2[0] if coa2.dim() > 2 else coa2
+        b1_static = b1[0] if b1.dim() > 2 else b1
+        b2_static = b2[0] if b2.dim() > 2 else b2
+
+        recon_x0_list, recon_x1_list, recon_x2_list = [], [], []
+
+        for i in range(batch_size):
+            # Extract single sample features for this item in the batch
+            x_0 = x_0_batch[i]
+            x_1 = x_1_batch[i]
+            x_2 = x_2_batch[i]
+
+            # Pass the unbatched (2D) features and static topology matrices to the encoder
+            h_0, h_1, h_2 = self.encoder(x_0, x_1, x_2, a0_static, a1_static, coa2_static, b1_static, b2_static)
+
+            # Decode the results
+            x0_reconstructed = self.decoder_x0(h_0)
+            x1_reconstructed = self.decoder_x1(h_1)
+            x2_reconstructed = self.decoder_x2(h_2)
+
+            recon_x0_list.append(x0_reconstructed)
+            recon_x1_list.append(x1_reconstructed)
+            recon_x2_list.append(x2_reconstructed)
+    
+        # Stack the list of results back into a single batched tensor
+        return torch.stack(recon_x0_list), torch.stack(recon_x1_list), torch.stack(recon_x2_list)
+    
+    def forward_temporal(self, seq_x0, seq_x1, seq_x2, a0, a1, coa2, b1, b2):
+        """
+        Forward pass for temporal prediction. New architecture: LSTM -> HMC -> Decoder.
+        """
+        batch_size = seq_x0.size(0)
+        num_0_cells = seq_x0.size(2)
+        num_1_cells = seq_x1.size(2)
+        num_2_cells = seq_x2.size(2)
+
+        # Reshape for LSTM: (batch * num_cells, seq_len, feat_dim)
+        lstm_input_x0 = seq_x0.permute(0, 2, 1, 3).reshape(-1, self.n_input, seq_x0.shape[-1])
+        lstm_input_x1 = seq_x1.permute(0, 2, 1, 3).reshape(-1, self.n_input, seq_x1.shape[-1])
+        lstm_input_x2 = seq_x2.permute(0, 2, 1, 3).reshape(-1, self.n_input, seq_x2.shape[-1])
+        
+        # 1. Encode sequences with LSTM to get final hidden state
+        _, (h_n_x0, _) = self.lstm_encoder_x0(lstm_input_x0)
+        _, (h_n_x1, _) = self.lstm_encoder_x1(lstm_input_x1)
+        _, (h_n_x2, _) = self.lstm_encoder_x2(lstm_input_x2)
+
+        # Reshape LSTM output back to (batch, num_cells, hidden_dim)
+        x_0_lstm_enc = h_n_x0.squeeze(0).reshape(batch_size, num_0_cells, -1)
+        x_1_lstm_enc = h_n_x1.squeeze(0).reshape(batch_size, num_1_cells, -1)
+        x_2_lstm_enc = h_n_x2.squeeze(0).reshape(batch_size, num_2_cells, -1)
+
+        # 2. Pass LSTM-encoded features to HMC encoder
+        x_0_hmc_enc, _, x_2_hmc_enc = self.encoder(
+            x_0_lstm_enc, x_1_lstm_enc, x_2_lstm_enc, a0, a1, coa2, b1, b2
+            )
+            
+        # 3. Decode HMC output to predict original features
+        x0_pred = self.decoder_x0(x_0_hmc_enc)
+        x2_pred = self.decoder_x2(x_2_hmc_enc)
+        x2_mean_pred = torch.mean(x2_pred, dim=1, keepdim=True).squeeze()
+
+        return x0_pred, x2_mean_pred
+    
+    def forward_tcn(self, seq_x0, seq_x1, seq_x2, a0, a1, coa2, b1, b2):
+        # This method would also need to be updated to the new architecture
+        # For now, it remains as a placeholder
+        raise NotImplementedError("TCN forward pass is not updated to the new architecture yet.") 

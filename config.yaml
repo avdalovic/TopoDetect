@@ -1,0 +1,54 @@
+# Configuration for Anomaly Detection Experiments
+
+# -- Experiment Settings --
+experiment_name: "swat_static_ccann"
+project_name: "TopoDetect"
+entity: "avdalovica"
+
+# -- Data Settings --
+data:
+  dataset: "SWAT" # Options: SWAT, WADI, TEP
+  data_dir: "data/SWAT"
+  train_path: "SWATv0_train.csv"
+  test_path: "SWATv0_test.csv"
+  sample_rate: 0.01
+  validation_split_ratio: 0.2
+  temporal_mode: False # False for reconstruction, True for temporal prediction
+  temporal_sample_rate: 1 # Subsample data for temporal mode. 1 = no sampling.
+
+# -- Model Hyperparameters --
+model:
+  name: "AnomalyCCANN"
+  use_tcn: False # Whether to use TCN for temporal modeling
+  feature_dim: 3
+  n_input: 10 # For temporal mode
+  channels_per_layer:
+    - - [3, 3, 3] # in_channels
+      - [32, 32, 32] # intermediate_channels
+      - [64, 64, 64] # final_channels
+
+# -- Training Settings --
+training:
+  epochs: 10
+  batch_size: 1 # HMC usually works with batch_size=1
+  learning_rate: 0.001
+  weight_decay: 1e-5
+  grad_clip_value: 1.0
+  test_interval: 1
+  early_stopping:
+    enabled: True
+    patience: 3
+    min_delta: 1e-4
+
+# -- Anomaly Detection Settings --
+anomaly_detection:
+  threshold_method: "percentile" # or "mean_sd"
+  threshold_percentile: 99.0
+  sd_multiplier: 2.5
+  use_component_thresholds: False
+  temporal_consistency: 1
+
+# -- System Settings --
+system:
+  device: "cuda" # "cuda" or "cpu"
+  checkpoint_dir: "model_checkpoints" 
