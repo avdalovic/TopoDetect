@@ -12,14 +12,29 @@ class AnomalyCCANN(nn.Module):
     Uses either an autoencoder approach to reconstruct features, or a temporal approach
     to predict the next timestep's features.
     """
-    def __init__(self, channels_per_layer, original_feature_dim, temporal_mode=False, use_tcn=False, n_input=10):
+    def __init__(self, channels_per_layer, original_feature_dims, temporal_mode=False, use_tcn=False, n_input=10):
         """
         Initialize the anomaly detection model.
+        
+        Parameters
+        ----------
+        channels_per_layer : list
+            Channel configuration for the HMC layers
+        original_feature_dims : dict
+            Dictionary containing feature dimensions for each cell type:
+            {'0': dim_0, '1': dim_1, '2': dim_2}
+        temporal_mode : bool, default=False
+            Whether to use temporal mode
+        use_tcn : bool, default=False
+            Whether to use TCN instead of LSTM for temporal mode
+        n_input : int, default=10
+            Number of input timesteps for temporal mode
         """
         super().__init__()
         self.temporal_mode = temporal_mode
         self.use_tcn = use_tcn
         self.n_input = n_input
+        self.original_feature_dims = original_feature_dims
         
         if self.temporal_mode:
             # In temporal mode, an LSTM/TCN first encodes the sequence.
@@ -38,29 +53,33 @@ class AnomalyCCANN(nn.Module):
             if self.use_tcn:
                 # This path is not fully implemented for the new architecture yet
                 print(f"Using TCN temporal mode with sequence length {n_input}")
-                self.tcn_x0 = TemporalConvNet(input_dim=original_feature_dim, hidden_dim=self.lstm_hidden_dim*2, output_dim=self.lstm_hidden_dim)
+                self.tcn_x0 = TemporalConvNet(input_dim=original_feature_dims['0'], hidden_dim=self.lstm_hidden_dim*2, output_dim=self.lstm_hidden_dim)
+                self.tcn_x1 = TemporalConvNet(input_dim=original_feature_dims['1'], hidden_dim=self.lstm_hidden_dim*2, output_dim=self.lstm_hidden_dim)
+                self.tcn_x2 = TemporalConvNet(input_dim=original_feature_dims['2'], hidden_dim=self.lstm_hidden_dim*2, output_dim=self.lstm_hidden_dim)
             else:
                 print(f"Using LSTM temporal mode with sequence length {n_input}")
-                # LSTMs to encode the original features over time
-                self.lstm_encoder_x0 = nn.LSTM(input_size=original_feature_dim, hidden_size=self.lstm_hidden_dim, batch_first=True)
-                self.lstm_encoder_x1 = nn.LSTM(input_size=original_feature_dim, hidden_size=self.lstm_hidden_dim, batch_first=True)
-                self.lstm_encoder_x2 = nn.LSTM(input_size=original_feature_dim, hidden_size=self.lstm_hidden_dim, batch_first=True)
+                # LSTMs to encode the original features over time - use appropriate input sizes
+                self.lstm_encoder_x0 = nn.LSTM(input_size=original_feature_dims['0'], hidden_size=self.lstm_hidden_dim, batch_first=True)
+                self.lstm_encoder_x1 = nn.LSTM(input_size=original_feature_dims['1'], hidden_size=self.lstm_hidden_dim, batch_first=True)
+                self.lstm_encoder_x2 = nn.LSTM(input_size=original_feature_dims['2'], hidden_size=self.lstm_hidden_dim, batch_first=True)
             
             # Decoders map from HMC's output dimension back to original feature dimension
             decoder_input_dim = channels_per_layer[-1][-1][-1]
-            self.decoder_x0 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_input_dim, output_dim=original_feature_dim)
-            self.decoder_x2 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_input_dim, output_dim=original_feature_dim)
+            self.decoder_x0 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_input_dim, output_dim=original_feature_dims['0'])
+            self.decoder_x1 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_input_dim, output_dim=original_feature_dims['1'])
+            self.decoder_x2 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_input_dim, output_dim=original_feature_dims['2'])
 
         else: # Reconstruction mode
             print(f"Using reconstruction mode")
+            print(f"Feature dimensions: 0-cells={original_feature_dims['0']}, 1-cells={original_feature_dims['1']}, 2-cells={original_feature_dims['2']}")
             self.encoder = HMC(
                 channels_per_layer=channels_per_layer
             )
             encoder_output_dim = channels_per_layer[-1][-1][-1]
-            # Restore all three decoders for hierarchical reconstruction
-            self.decoder_x0 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dim)
-            self.decoder_x1 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dim)
-            self.decoder_x2 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dim)
+            # Create decoders for hierarchical reconstruction with appropriate output dimensions
+            self.decoder_x0 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dims['0'])
+            self.decoder_x1 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dims['1'])
+            self.decoder_x2 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dims['2'])
 
     def forward(self, *args, **kwargs):
         # Correctly dispatch based on the mode

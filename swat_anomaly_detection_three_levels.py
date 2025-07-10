@@ -66,7 +66,7 @@ class SWaTDataset(Dataset):
         if self.temporal_mode and temporal_sample_rate > 1:
             # Subsample data to reduce training cost
             sampled_indices = list(range(0, len(self.data), temporal_sample_rate))
-            self.data = self.data.iloc[sampled_indices].reset_index(drop=True)
+                self.data = self.data.iloc[sampled_indices].reset_index(drop=True)
             self.labels = self.labels[sampled_indices]
             print(f"Applied temporal sampling every {temporal_sample_rate} timesteps: {len(self.data)} samples remaining")
 
@@ -401,7 +401,7 @@ class AnomalyCCANN(nn.Module):
         self.temporal_mode = temporal_mode
         self.use_tcn = use_tcn
         self.n_input = n_input
-
+        
         if self.temporal_mode:
             # In temporal mode, an LSTM/TCN first encodes the sequence.
             # The output of the temporal model becomes the input to the HMC encoder.
@@ -448,12 +448,12 @@ class AnomalyCCANN(nn.Module):
         if self.temporal_mode:
             # In temporal mode, we expect a single dictionary argument.
             sample = args[0] if args else kwargs
-            return self.forward_temporal(
+                    return self.forward_temporal(
                 sample['x_0'], sample['x_1'], sample['x_2'],
                 sample['a0'], sample['a1'], sample['coa2'],
                 sample['b1'], sample['b2']
-            )
-        else:
+                )
+            else:
             # In reconstruction mode, we expect positional arguments. Pass them through.
             return self.forward_original(*args, **kwargs)
 
@@ -493,7 +493,7 @@ class AnomalyCCANN(nn.Module):
     
         # Stack the list of results back into a single batched tensor
         return torch.stack(recon_x0_list), torch.stack(recon_x1_list), torch.stack(recon_x2_list)
-        
+    
     def forward_temporal(self, seq_x0, seq_x1, seq_x2, a0, a1, coa2, b1, b2):
         """
         Forward pass for temporal prediction. New architecture: LSTM -> HMC -> Decoder.
@@ -507,7 +507,7 @@ class AnomalyCCANN(nn.Module):
         lstm_input_x0 = seq_x0.permute(0, 2, 1, 3).reshape(-1, self.n_input, seq_x0.shape[-1])
         lstm_input_x1 = seq_x1.permute(0, 2, 1, 3).reshape(-1, self.n_input, seq_x1.shape[-1])
         lstm_input_x2 = seq_x2.permute(0, 2, 1, 3).reshape(-1, self.n_input, seq_x2.shape[-1])
-
+        
         # 1. Encode sequences with LSTM to get final hidden state
         _, (h_n_x0, _) = self.lstm_encoder_x0(lstm_input_x0)
         _, (h_n_x1, _) = self.lstm_encoder_x1(lstm_input_x1)
@@ -521,15 +521,15 @@ class AnomalyCCANN(nn.Module):
         # 2. Pass LSTM-encoded features to HMC encoder
         x_0_hmc_enc, _, x_2_hmc_enc = self.encoder(
             x_0_lstm_enc, x_1_lstm_enc, x_2_lstm_enc, a0, a1, coa2, b1, b2
-        )
-        
+            )
+            
         # 3. Decode HMC output to predict original features
         x0_pred = self.decoder_x0(x_0_hmc_enc)
         x2_pred = self.decoder_x2(x_2_hmc_enc)
         x2_mean_pred = torch.mean(x2_pred, dim=1, keepdim=True).squeeze()
 
         return x0_pred, x2_mean_pred
-
+    
     def forward_tcn(self, seq_x0, seq_x1, seq_x2, a0, a1, coa2, b1, b2):
         # This method would also need to be updated to the new architecture
         # For now, it remains as a placeholder
@@ -1624,7 +1624,7 @@ class AnomalyTrainer:
             
             # Log training loss to wandb
             wandb.log({"train_loss": train_loss, "epoch": epoch + 1})
-
+            
             # Update learning rate based on loss
             self.scheduler.step(train_loss)
             
@@ -1653,7 +1653,7 @@ class AnomalyTrainer:
                         "test_recall": test_recall,
                         "epoch": epoch + 1
                     })
-
+                    
                     # Save model checkpoint (always save the latest)
                     checkpoint_path = os.path.join(checkpoint_dir, f"model_ckpt_ep_{epoch+1}.pt")
                     torch.save({
@@ -2160,7 +2160,7 @@ def run_experiment(config):
     # Create directory for saved test data
     saved_data_dir = "saved_test_data"
     os.makedirs(saved_data_dir, exist_ok=True)
-    
+
     # Load or create test data
     saved_test_path = os.path.join(saved_data_dir, f"test_data_{config['data']['sample_rate']}.pkl")
     
@@ -2169,7 +2169,7 @@ def run_experiment(config):
         train_data, validation_data, test_data = load_saved_test_data(saved_test_path)
     else:
         print("Creating new train/validation/test split...")
-        train_data, validation_data, test_data = load_swat_data(
+    train_data, validation_data, test_data = load_swat_data(
             train_path=train_path,
             test_path=test_path,
             sample_rate=config['data']['sample_rate'],
@@ -2191,12 +2191,12 @@ def run_experiment(config):
     train_dataset = SWaTDataset(train_data, swat_complex, temporal_mode=temporal_mode, n_input=config['model']['n_input'], temporal_sample_rate=config['data']['temporal_sample_rate'])
     validation_dataset = SWaTDataset(validation_data, swat_complex, temporal_mode=temporal_mode, n_input=config['model']['n_input'], temporal_sample_rate=config['data']['temporal_sample_rate']) if not validation_data.empty else None
     test_dataset = SWaTDataset(test_data, swat_complex, temporal_mode=temporal_mode, n_input=config['model']['n_input'], temporal_sample_rate=config['data']['temporal_sample_rate'])
-    
+
     # Create dataloaders
     batch_size = config['training']['batch_size']
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=False) # Turn off pin_memory
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-    
+
     if validation_dataset:
         validation_dataloader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False)
     else:

@@ -3,14 +3,13 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-# The old import was: from utils.attack_utils import is_actuator
-# The new import reflects the new 'src' structure
+
 from src.utils.attack_utils import is_actuator
 
 
 class SWaTDataset(Dataset):
     """Dataset class for SWAT anomaly detection."""
-    def __init__(self, data, swat_complex, feature_dim=3, n_input=10, temporal_mode=False, temporal_sample_rate=1):
+    def __init__(self, data, swat_complex, feature_dim_0=3, n_input=10, temporal_mode=False, temporal_sample_rate=1):
         """
         Initialize the SWAT dataset for anomaly detection.
 
@@ -20,8 +19,8 @@ class SWaTDataset(Dataset):
             DataFrame containing the SWAT measurements and labels
         swat_complex : toponetx.CombinatorialComplex
             Combinatorial complex representing the SWAT system topology
-        feature_dim : int, default=3
-            Dimension of feature vectors (3 to accommodate one-hot encoding)
+        feature_dim_0 : int, default=3
+            Dimension of feature vectors for 0-cells (3 to accommodate one-hot encoding)
         n_input : int, default=10
             Number of input timesteps for temporal mode
         temporal_mode : bool, default=False
@@ -31,7 +30,9 @@ class SWaTDataset(Dataset):
         """
         self.data = data
         self.complex = swat_complex.get_complex()
-        self.feature_dim = feature_dim
+        self.feature_dim_0 = feature_dim_0  # 0-cells: 3D
+        self.feature_dim_1 = feature_dim_0 * 2  # 1-cells: 6D (concatenation of two 0-cells)
+        self.feature_dim_2 = feature_dim_0 + 1  # 2-cells: 4D (avg of 0-cells + PLC zone size)
         self.n_input = n_input
         self.temporal_mode = temporal_mode
 
@@ -66,7 +67,10 @@ class SWaTDataset(Dataset):
             self.effective_length = len(self.data)
 
         print(f"Initialized SWaTDataset with {self.effective_length} samples")
-        print(f"Feature dimensions - 0-cells: {self.x_0.shape}, 1-cells: {self.x_1.shape}, 2-cells: {self.x_2.shape}")
+        print(f"Feature dimensions - 0-cells: {self.x_0.shape} (dim={self.feature_dim_0}), 1-cells: {self.x_1.shape} (dim={self.feature_dim_1}), 2-cells: {self.x_2.shape} (dim={self.feature_dim_2})")
+        
+        # Debug: Print sample features
+        self.print_sample_features()
 
     def preprocess_features(self):
         """
@@ -79,7 +83,7 @@ class SWaTDataset(Dataset):
         num_components = len(self.columns)
 
         # Initialize tensor for 0-cell features
-        features = torch.zeros((num_samples, num_components, self.feature_dim))
+        features = torch.zeros((num_samples, num_components, self.feature_dim_0))
 
         print("Preprocessing features...")
         
@@ -157,13 +161,14 @@ class SWaTDataset(Dataset):
     def compute_initial_x1(self):
         """
         Initialize 1-cell features based on connected 0-cells.
+        Concatenate features instead of averaging to preserve information.
 
         Returns
         -------
         torch.Tensor
-            Tensor of shape [num_timestamps, num_1_cells, feature_dim]
+            Tensor of shape [num_timestamps, num_1_cells, feature_dim_1] where feature_dim_1 = feature_dim_0 * 2
         """
-        print("Computing initial 1-cell features...")
+        print("Computing initial 1-cell features (concatenation method)...")
         num_samples = len(self.data)
 
         # Get row and column dictionaries for 0-1 incidence matrix
@@ -175,10 +180,10 @@ class SWaTDataset(Dataset):
         
         print(f"Found {num_1_cells} 1-cells")
 
-        # Create tensor for 1-cell features
-        x_1 = torch.zeros((num_samples, num_1_cells, self.feature_dim))
+        # Create tensor for 1-cell features (now 6D due to concatenation)
+        x_1 = torch.zeros((num_samples, num_1_cells, self.feature_dim_1))
 
-        # For each 1-cell (edge), average the features of its boundary 0-cells
+        # For each 1-cell (edge), concatenate the features of its boundary 0-cells
         for cell_idx, cell in enumerate(cells_1):
             # Each 1-cell is a frozenset containing two 0-cells
             boundary_nodes = list(cell)
@@ -190,13 +195,12 @@ class SWaTDataset(Dataset):
             try:
                 node_indices = [row_dict[frozenset({node})] for node in boundary_nodes]
 
-                # Average the features of the boundary nodes
+                # Concatenate the features of the boundary nodes
                 for sample_idx in range(num_samples):
-                    # Average features of connected 0-cells
-                    edge_feat = torch.zeros(self.feature_dim)
-                    for node_idx in node_indices:
-                        edge_feat += self.x_0[sample_idx, node_idx]
-                    edge_feat /= len(node_indices)
+                    # Concatenate features of connected 0-cells
+                    node1_feat = self.x_0[sample_idx, node_indices[0]]  # First 3 dimensions
+                    node2_feat = self.x_0[sample_idx, node_indices[1]]  # Next 3 dimensions
+                    edge_feat = torch.cat([node1_feat, node2_feat], dim=0)  # 6D concatenated feature
                     x_1[sample_idx, cell_idx] = edge_feat
 
             except KeyError as e:
@@ -208,13 +212,14 @@ class SWaTDataset(Dataset):
     def compute_initial_x2(self):
         """
         Initialize 2-cell features based on grouped 0-cells.
+        Add PLC zone size information as 4th dimension.
 
         Returns
         -------
         torch.Tensor
-            Tensor of shape [num_timestamps, num_2_cells, feature_dim]
+            Tensor of shape [num_timestamps, num_2_cells, feature_dim_2] where feature_dim_2 = feature_dim_0 + 1
         """
-        print("Computing initial 2-cell features...")
+        print("Computing initial 2-cell features (with PLC zone size)...")
         num_samples = len(self.data)
 
         # Get row dictionaries for 0-1 and 1-2 incidence matrices
@@ -227,10 +232,13 @@ class SWaTDataset(Dataset):
         
         print(f"Found {num_2_cells} 2-cells")
 
-        # Create tensor for 2-cell features
-        x_2 = torch.zeros((num_samples, num_2_cells, self.feature_dim))
+        # Create tensor for 2-cell features (now 4D: 3D averaged + 1D zone size)
+        x_2 = torch.zeros((num_samples, num_2_cells, self.feature_dim_2))
 
-        # For each 2-cell, collect and average the features of its 0-cells
+        # Total number of 0-cells for relative size calculation
+        total_0_cells = len(self.columns)
+
+        # For each 2-cell, collect and average the features of its 0-cells + add zone size
         for cell_idx, cell in enumerate(cells_2):
             # Each 2-cell contains multiple 0-cells
             # Extract 0-cells directly from the frozenset (they're already listed there)
@@ -245,17 +253,25 @@ class SWaTDataset(Dataset):
                     if node_frozenset in row_dict_01:
                         node_indices.append(row_dict_01[node_frozenset])
                 
-                # If we have valid nodes, average their features
+                # If we have valid nodes, average their features and add zone size
                 if node_indices:
+                    # Calculate relative zone size (number of 0-cells in this 2-cell / total 0-cells)
+                    zone_size = len(node_indices) / total_0_cells
+                    
                     for sample_idx in range(num_samples):
-                        # Average features of all 0-cells in the group
-                        face_feat = torch.zeros(self.feature_dim)
+                        # Average features of all 0-cells in the group (first 3 dimensions)
+                        face_feat = torch.zeros(self.feature_dim_0)
                         for node_idx in node_indices:
                             face_feat += self.x_0[sample_idx, node_idx]
                         face_feat /= len(node_indices)
-                        x_2[sample_idx, cell_idx] = face_feat
+                        
+                        # Combine averaged features with zone size
+                        full_feat = torch.cat([face_feat, torch.tensor([zone_size])], dim=0)
+                        x_2[sample_idx, cell_idx] = full_feat
                 else:
                     print(f"Warning: No valid 0-cells found for 2-cell {cell}")
+                    # Set zone size to 0 if no valid nodes
+                    x_2[:, cell_idx, -1] = 0.0
 
             except Exception as e:
                 print(f"Warning: Error computing 2-cell features for cell {cell}: {e}")
@@ -263,6 +279,31 @@ class SWaTDataset(Dataset):
 
         print(f"Computed 2-cell features shape: {x_2.shape}")
         return x_2
+
+    def print_sample_features(self):
+        """Print sample features for debugging."""
+        if len(self.data) == 0:
+            return
+            
+        print("\n=== DEBUG: Sample Features ===")
+        
+        # Print one 0-cell feature
+        sample_0_cell = self.x_0[0, 0]  # First sample, first 0-cell
+        print(f"Sample 0-cell feature (component '{self.columns[0]}'): {sample_0_cell.numpy()}")
+        
+        # Print one 1-cell feature
+        if self.x_1.shape[1] > 0:
+            sample_1_cell = self.x_1[0, 0]  # First sample, first 1-cell
+            print(f"Sample 1-cell feature: {sample_1_cell.numpy()}")
+        
+        # Print one 2-cell feature
+        if self.x_2.shape[1] > 0:
+            sample_2_cell = self.x_2[0, 0]  # First sample, first 2-cell
+            print(f"Sample 2-cell feature: {sample_2_cell.numpy()}")
+            print(f"  - First 3 dims (averaged 0-cell features): {sample_2_cell[:3].numpy()}")
+            print(f"  - 4th dim (PLC zone size): {sample_2_cell[3].item():.4f}")
+        
+        print("=== END DEBUG ===\n")
 
     def __len__(self):
         """Return the number of samples."""

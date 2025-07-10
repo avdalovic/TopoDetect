@@ -33,10 +33,12 @@ class SWATComplex:
             # Stage 1: Raw Water Stage
             ("MV101", "FIT101", "valve affects flow"),
             ("FIT101", "LIT101", "flow affects level"),
-            ("LIT101", "P101", "tank level controls pump"),
-            ("P101", "FIT201", "pump to stage 2 flow meter"),
-            ("P102", "FIT201", "backup pump to stage 2"),
-            
+            ("LIT101", "P101", "tank level influences pump"),
+            ("LIT101", "P102", "tank level influences backup pump"),
+            ("P101", "MV201", "pump 1 to  valve 201"),
+            ("P101", "FIT201", "pump 1 to stage 2 flow meter"),
+            ("P102", "FIT201", "backup pump 2 to stage 2 flow meter"),
+            ("P102", "MV201", "backup pump 2 to valve 201"),
             # Stage 2: Chemical Dosing
             ("FIT201", "AIT202", "flow affects pH reading"),
             ("FIT201", "AIT201", "flow affects conductivity reading"),

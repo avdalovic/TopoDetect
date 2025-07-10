@@ -419,3 +419,104 @@ def subsample(data, num_to_sample):
 	shuffle_idx = np.random.permutation(len(data))[:num_to_sample]
 	return data[shuffle_idx]
 
+def adjust_attack_indices_for_sampling(attacks, original_length, sampled_length, sample_rate):
+    """
+    Adjust attack indices to account for data sampling.
+    
+    When we sample data (e.g., 10% sample rate), the attack indices need to be adjusted
+    to match the new indices in the sampled dataset.
+    
+    Parameters
+    ----------
+    attacks : list of np.array
+        Original attack indices from get_attack_indices()
+    original_length : int
+        Length of the original dataset
+    sampled_length : int
+        Length of the sampled dataset
+    sample_rate : float
+        Sampling rate used (e.g., 0.1 for 10%)
+        
+    Returns
+    -------
+    list of list
+        Adjusted attack windows as [start, end] pairs that exist in sampled data
+    """
+    if sample_rate >= 1.0:
+        # No sampling, return original indices as [start, end] pairs
+        return [[arr[0], arr[-1]] for arr in attacks]
+    
+    print(f"Adjusting attack indices for {sample_rate*100}% sampling...")
+    print(f"Original dataset length: {original_length}, Sampled length: {sampled_length}")
+    
+    # Create mapping from original indices to sampled indices using linspace
+    # This matches the sampling method used in load_swat_data
+    sampled_indices = np.linspace(0, original_length-1, sampled_length, dtype=int)
+    
+    # Create a mapping dictionary for fast lookup
+    original_to_sampled = {}
+    for sampled_idx, original_idx in enumerate(sampled_indices):
+        original_to_sampled[original_idx] = sampled_idx
+    
+    adjusted_attacks = []
+    
+    for attack_idx, attack_range in enumerate(attacks):
+        attack_start = attack_range[0]
+        attack_end = attack_range[-1]
+        
+        # Find sampled indices that fall within this attack range
+        sampled_attack_indices = []
+        for sampled_idx, original_idx in enumerate(sampled_indices):
+            if attack_start <= original_idx <= attack_end:
+                sampled_attack_indices.append(sampled_idx)
+        
+        if len(sampled_attack_indices) > 0:
+            # Attack has representation in sampled data
+            adjusted_start = sampled_attack_indices[0]
+            adjusted_end = sampled_attack_indices[-1]
+            adjusted_attacks.append([adjusted_start, adjusted_end])
+            print(f"  Attack {attack_idx}: {attack_start}-{attack_end} -> {adjusted_start}-{adjusted_end} ({len(sampled_attack_indices)} points)")
+        else:
+            # Attack completely missed in sampling
+            print(f"  Attack {attack_idx}: {attack_start}-{attack_end} -> MISSED (no sampled points)")
+    
+    print(f"Adjusted attacks: {len(adjusted_attacks)}/{len(attacks)} attacks have representation in sampled data")
+    return adjusted_attacks
+
+def get_sampling_info_from_dataset(dataset):
+    """
+    Extract sampling information from a dataset to help with attack index adjustment.
+    
+    Parameters
+    ----------
+    dataset : SWaTDataset
+        The dataset object
+        
+    Returns
+    -------
+    dict
+        Dictionary containing sampling information
+    """
+    info = {
+        'sampled_length': len(dataset.data),
+        'columns': dataset.columns,
+        'labels': dataset.labels
+    }
+    
+    # Try to infer original length and sample rate
+    # This is a heuristic based on common SWAT dataset sizes
+    if hasattr(dataset, 'sample_rate'):
+        info['sample_rate'] = dataset.sample_rate
+        info['original_length'] = int(len(dataset.data) / dataset.sample_rate)
+    else:
+        # Estimate based on known SWAT test set size (~450k samples)
+        if len(dataset.data) < 50000:  # Likely sampled
+            estimated_sample_rate = len(dataset.data) / 449919  # Approximate full SWAT test size
+            info['sample_rate'] = estimated_sample_rate
+            info['original_length'] = 449919
+        else:
+            info['sample_rate'] = 1.0
+            info['original_length'] = len(dataset.data)
+    
+    return info
+

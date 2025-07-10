@@ -330,13 +330,24 @@ def run_experiment(config):
     # Get component names
     component_names = [col for col in train_data.columns if col not in ['Timestamp', 'Normal/Attack']]
     temporal_mode = config['data']['temporal_mode']
-    use_tcn = config['model']['use_tcn']
+
+    # Remove dynamic feature filtering - use general method
+    print("Using general method without dynamic feature filtering.")
 
     # Create datasets
     print(f"Creating datasets (train, validation, test) in {'temporal' if temporal_mode else 'reconstruction'} mode...")
-    train_dataset = SWaTDataset(train_data, swat_complex, temporal_mode=temporal_mode, n_input=config['model']['n_input'], temporal_sample_rate=config['data']['temporal_sample_rate'])
-    validation_dataset = SWaTDataset(validation_data, swat_complex, temporal_mode=temporal_mode, n_input=config['model']['n_input'], temporal_sample_rate=config['data']['temporal_sample_rate']) if not validation_data.empty else None
-    test_dataset = SWaTDataset(test_data, swat_complex, temporal_mode=temporal_mode, n_input=config['model']['n_input'], temporal_sample_rate=config['data']['temporal_sample_rate'])
+    if temporal_mode:
+        dataset_args = {
+            'temporal_mode': True,
+            'n_input': config['model']['n_input'],
+            'temporal_sample_rate': config['data']['temporal_sample_rate']
+        }
+    else:
+        dataset_args = {'temporal_mode': False}
+
+    train_dataset = SWaTDataset(train_data, swat_complex, **dataset_args)
+    validation_dataset = SWaTDataset(validation_data, swat_complex, **dataset_args) if not validation_data.empty else None
+    test_dataset = SWaTDataset(test_data, swat_complex, **dataset_args)
 
     # Create dataloaders
     batch_size = config['training']['batch_size']
@@ -358,16 +369,33 @@ def run_experiment(config):
 
     # Create model
     print(f"Creating model in {'temporal' if temporal_mode else 'reconstruction'} mode...")
+    
+    # Get feature dimensions from the dataset
+    original_feature_dims = {
+        '0': train_dataset.feature_dim_0,
+        '1': train_dataset.feature_dim_1,
+        '2': train_dataset.feature_dim_2
+    }
+    print(f"Using feature dimensions: {original_feature_dims}")
+    
     model = AnomalyCCANN(
         config['model']['channels_per_layer'], 
-        original_feature_dim=config['model']['feature_dim'],
+        original_feature_dims=original_feature_dims,
         temporal_mode=temporal_mode,
-        use_tcn=use_tcn,
-        n_input=config['model']['n_input']
+        n_input=config['model'].get('n_input', 10) # Get n_input safely
     )
 
     # Create trainer with validation dataloader
     print("Creating trainer with validation set for thresholding...")
+    
+    # Correction: Rename 'method' key from config to 'evaluation_method' for trainer
+    eval_config = config.get('evaluation', {})
+    if 'method' in eval_config:
+        eval_config['evaluation_method'] = eval_config.pop('method')
+    # Correction: Rename 'fp_alarm_window_seconds' to 'fp_alarm_window'
+    if 'fp_alarm_window_seconds' in eval_config:
+        eval_config['fp_alarm_window'] = eval_config.pop('fp_alarm_window_seconds')
+        
     trainer = AnomalyTrainer(
         model,
         train_dataloader,
@@ -375,19 +403,16 @@ def run_experiment(config):
         test_dataloader,
         learning_rate=float(config['training']['learning_rate']),
         device=device,
-        threshold_percentile=float(config['anomaly_detection']['threshold_percentile']),
-        use_geometric_mean=False, # Or get from config
-        epsilon=1e-6,
-        threshold_method=config['anomaly_detection']['threshold_method'],
-        sd_multiplier=float(config['anomaly_detection']['sd_multiplier']),
-        use_component_thresholds=config['anomaly_detection']['use_component_thresholds'], 
-        temporal_consistency=int(config['anomaly_detection']['temporal_consistency']),
         weight_decay=float(config['training']['weight_decay']),
-        grad_clip_value=float(config['training']['grad_clip_value'])
+        grad_clip_value=float(config['training']['grad_clip_value']),
+        # Pass sample rate for proper attack index adjustment
+        sample_rate=float(config['data']['sample_rate']),
+        # Pass the corrected evaluation config block
+        **eval_config
     )
 
     # Create checkpoint directory
-    checkpoint_dir = f"{{config['system']['checkpoint_dir']}}/{{config['experiment_name']}}"
+    checkpoint_dir = f"{config['system']['checkpoint_dir']}/{config['experiment_name']}"
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     # Train model with early stopping
