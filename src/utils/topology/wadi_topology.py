@@ -49,54 +49,72 @@ class WADIComplex:
         # This list is based on a detailed semantic breakdown of the WADI process.
         relationships = [
             # 1. Raw_Water_Tank (Stage 1)
-            # Level transmitter (LT) controls inlet valve (MV) and transfer pump (P)
-            ("1_LT_001_PV", "1_MV_001_STATUS", "Tank level controls inlet valve"),
-            ("1_LT_001_PV", "1_P_003_STATUS", "Tank level controls transfer pump to stage 2"),
-            # Inlet valve and circulation pumps affect inflow (FIT)
-            ("1_MV_001_STATUS", "1_FIT_001_PV", "Inlet valve status affects inflow rate"),
-            ("1_P_001_STATUS", "1_FIT_001_PV", "Circulation pump P1 affects inflow rate"),
-            ("1_P_002_STATUS", "1_FIT_001_PV", "Circulation pump P2 affects inflow rate"),
-            # Inflow affects tank level
-            ("1_FIT_001_PV", "1_LT_001_PV", "Inflow rate affects tank level"),
-            # Low-level alarms (LS) stop pumps
-            ("1_LS_001_AL", "1_P_001_STATUS", "Low-level alarm stops circulation pump P1"),
-            ("1_LS_001_AL", "1_P_002_STATUS", "Low-level alarm stops circulation pump P2"),
-            ("1_LS_002_AL", "1_P_001_STATUS", "Low-level alarm 2 stops circulation pump P1"),
-            ("1_LS_002_AL", "1_P_002_STATUS", "Low-level alarm 2 stops circulation pump P2"),
-            # Dosing pumps are related to water quality (AIT)
-            ("1_P_004_STATUS", "1_AIT_001_PV", "Dosing pump affects conductivity"),
-            ("1_P_005_STATUS", "1_AIT_002_PV", "Dosing pump affects turbidity"),
-            ("1_P_006_STATUS", "1_AIT_003_PV", "Dosing pump affects pH"),
+            # Raw water comes in through MV001, is metered by FIT001, and fills Tank1 (LT001)
+            ("1_MV_001_STATUS", "1_FIT_001_PV", "inlet valve → inflow meter"),
+            ("1_FIT_001_PV",   "1_LT_001_PV",  "inflow meter → tank level"),
+
+            
+            # When LT001 drops below low‐level, LS_001/LS_002 alarm and shut off pumps & valve
+            ("1_LT_001_PV",  "1_LS_001_AL", "tank level → low level alarm 1"),
+            ("1_LT_001_PV",  "1_LS_002_AL", "tank level → low level alarm 2"),
+            ("1_LS_001_AL", "1_P_001_STATUS", "low level alarm → shut off pump P1"),
+            ("1_LS_001_AL", "1_P_002_STATUS", "low level alarm → shut off pump P2"),
+            ("1_LS_002_AL", "1_P_001_STATUS", "low level alarm 2 → shut off pump P1"),
+            ("1_LS_002_AL", "1_P_002_STATUS", "low level alarm 2 → shut off pump P2"),
+            ("1_LS_001_AL",  "1_MV_001_STATUS","alarm1 → shut off inlet valve"),
+            ("1_LS_002_AL",  "1_MV_001_STATUS","alarm2 → shut off inlet valve"),
+
+
+            ("1_P_005_STATUS", "2_MV_001_STATUS", "transfer pump P005 → Stage2 inlet valve"),
+            ("1_P_005_STATUS", "2_MV_003_STATUS", "transfer pump P005 → Stage2 inlet valve"),
+            ("1_P_005_STATUS", "2_FIT_001_PV",    "transfer pump P005 → Stage2 flow meter"),
+
+            # Circulation Pumps (keep tank mixed)
+            ("1_P_001_STATUS", "1_FIT_001_PV", "circulation pump P1 → inflow meter"),
+            ("1_P_002_STATUS", "1_FIT_001_PV", "circulation pump P2 → inflow meter"),
+
 
             # 2. Elevated (Stage 2) & Cross-Subsystem links
-            # Transfer pump from S1 affects inflow to S2
-            ("1_P_003_STATUS", "2_FIT_001_PV", "S1 transfer pump affects S2 inflow"),
-            # S2 inflow affects S2 level
-            ("2_FIT_001_PV", "2_LT_001_PV", "S2 inflow rate affects S2 tank level"),
-            # S2 tank level gates the transfer pump from S1
-            ("2_LT_001_PV", "1_P_003_STATUS", "S2 tank level gates S1 transfer pump"),
-            # S2 level transmitters control the main outlet valve to consumers
-            ("2_LT_001_PV", "2_MV_001_STATUS", "S2 level gates main consumer valve"),
-            ("2_LT_002_PV", "2_MV_001_STATUS", "S2 level backup gates main consumer valve"),
-            # Head pressure is related to level
-            ("2_LT_001_PV", "2_PIT_001_PV", "Tank level determines head pressure"),
-            
-            # 3. Booster (Stage 2)
-            # Pressure controller loop
-            ("2_PIT_002_PV", "2_PIC_003_PV", "Discharge pressure is input to pressure controller"),
-            ("2_PIT_003_PV", "2_PIC_003_PV", "Suction pressure is input to pressure controller"),
-            ("2_PIC_003_PV", "2_PIC_003_CO", "Pressure controller calculates output"),
-            # Controller output affects pump speed and modulating valve
+            ("2_MV_001_STATUS", "2_FIT_001_PV", "Valve MV001 → flow sensor FIT001"),        
+            ("2_MV_003_STATUS", "2_FIT_002_PV", "Valve MV003 → flow sensor FIT002"),
+
+            # Flow → tank level  
+            ("2_FIT_001_PV", "2_LT_001_PV", "Flow FIT001 → level LT001"),
+            ("2_FIT_002_PV", "2_LT_002_PV", "Flow FIT002 → level LT002"),
+
+            # Tank level → head pressure sensor
+            ("2_LT_001_PV", "2_PIT_001_PV", "Level LT001 → head pressure PIT001"),
+
+            # Tank levels gate the two outlet valves
+            ("2_LT_001_PV", "2_MV_005_STATUS", "Level LT001 → outlet valve MV005"),
+            ("2_LT_002_PV", "2_MV_006_STATUS", "Level LT002 → outlet valve MV006"),
+
+            #2. Booster (Stage 2)
+
+            # Outlet valves → booster pumps to Consumers
+            ("2_MV_005_STATUS", "2_P_003_STATUS", "Valve MV005 → pump P003"),
+            ("2_MV_006_STATUS", "2_P_004_STATUS", "Valve MV006 → pump P004"),
+
+
+            # Discharge pressure → PIC003 input
+            ("2_PIT_002_PV", "2_PIC_003_PV", "Discharge pressure → PIC003 input"),
+            # Suction pressure → PIC003 input
+            ("2_PIT_003_PV", "2_PIC_003_PV", "Suction pressure → PIC003 input"),
+            ("2_PIC_003_PV", "2_PIC_003_CO", "PIC003 process value → control output"),
             ("2_PIC_003_CO", "2_P_003_SPEED", "Controller output sets pump speed"),
             ("2_PIC_003_CO", "2_P_004_SPEED", "Controller output sets pump speed"),
             ("2_PIC_003_CO", "2_MCV_007_CO", "Controller output drives booster valve"),
-            # Pump speed/status affects pressures
-            ("2_P_003_SPEED", "2_PIT_002_PV", "Pump speed affects discharge pressure"),
-            ("2_P_004_SPEED", "2_PIT_002_PV", "Pump speed affects discharge pressure"),
+            ("2_P_003_SPEED", "2_DPIT_001_PV", "Pump speed affects differential pressure"),
+            ("2_P_004_SPEED", "2_DPIT_001_PV", "Pump speed affects differential pressure"),
             ("2_P_003_STATUS", "2_DPIT_001_PV", "Pump status affects differential pressure"),
             ("2_P_004_STATUS", "2_DPIT_001_PV", "Pump status affects differential pressure"),
-            
-            # 5. Return (Stage 3) & Cross-Subsystem links
+            ("2_P_003_SPEED", " 2_PIT_002_PV", "Pump speed affects discharge pressure"),
+            ("2_P_004_SPEED", " 2_PIT_002_PV", "Pump speed affects discharge pressure"),
+
+
+
+
+            # 3. Return (Stage 3) & Cross-Subsystem links
             # Return inflow affects return tank level
             ("3_FIT_001_PV", "3_LT_001_PV", "Return inflow affects return tank level"),
             # Return tank level and alarms
@@ -107,79 +125,59 @@ class WADIComplex:
             ("3_LT_001_PV", "3_P_003_STATUS", "Return level controls return pump P3"),
             ("3_LT_001_PV", "3_P_004_STATUS", "Return level controls return pump P4"),
             # Return pump isolation valves
-            ("3_MV_001_STATUS", "3_P_001_STATUS", "Isolation valve for return pump P1"),
-            ("3_MV_002_STATUS", "3_P_002_STATUS", "Isolation valve for return pump P2"),
-            ("3_MV_003_STATUS", "3_P_003_STATUS", "Isolation valve for return pump P3"),
-            # Return pumps affect return outflow
-            ("3_P_001_STATUS", "3_FIT_001_PV", "Return pump P1 affects return outflow"),
-            # Raw water tank (S1) level also controls return pumps (interlock)
-            ("1_LT_001_PV", "3_P_001_STATUS", "Raw water level interlocks with return pump P1"),
-            # Return pumps feed back to raw water tank (S1)
-            ("3_P_001_STATUS", "1_FIT_001_PV", "Return pump P1 affects raw water inflow"),
+            ("3_P_001_STATUS", "3_FIT_001_PV","Pump P001 → return flow meter FIT001"),
+            ("3_P_002_STATUS", "3_FIT_001_PV", "Pump P002 → return flow meter FIT001"),
+
+            ("3_P_003_STATUS", "3_MV_002_STATUS", "Pump P003 → backwash valve MV002"),
+            ("3_P_004_STATUS", "3_MV_002_STATUS", "Pump P004 → backwash valve MV002"),
+            ("3_MV_002_STATUS", "1_FIT_001_PV", "Backwash valve MV002 → Stage1 inflow meter FIT001")
         ]
         
-        # Programmatically add relationships for all 6 consumer lines (101 to 601)
-        consumer_ids = ["101", "201", "301", "401", "501", "601"]
-        # MV_001 is for consumer 101, MV_002 for 201, etc.
-        elevated_valves = ["2_MV_001_STATUS", "2_MV_002_STATUS", "2_MV_003_STATUS", "2_MV_004_STATUS", "2_MV_005_STATUS", "2_MV_006_STATUS"]
+        # ─── Consumer Lines (Branches 101…601) ───
 
-        for cid, elev_valve in zip(consumer_ids, elevated_valves):
-            relationships.extend([
-                # Main flow control loop
-                (f"2_FIC_{cid}_PV", f"2_FIC_{cid}_CO", "flow measurement affects controller output"),
-                (f"2_FIC_{cid}_CO", f"2_MCV_{cid}_CO", "controller output affects modulating valve"),
-                (f"2_MCV_{cid}_CO", f"2_FIC_{cid}_PV", "modulating valve affects flow"),
-                # Main valve from elevated tank feeds this consumer line
-                (elev_valve, f"2_FIC_{cid}_PV", "elevated tank valve affects consumer flow"),
-                # Level switches control isolation valve
-                (f"2_LS_{cid}_AH", f"2_MV_{cid}_STATUS", "high level trips isolation valve"),
-                (f"2_LS_{cid}_AL", f"2_MV_{cid}_STATUS", "low level trips isolation valve"),
-                # Level switches also control drain solenoid
-                (f"2_LS_{cid}_AH", f"2_SV_{cid}_STATUS", "high level opens drain solenoid"),
-                (f"2_LS_{cid}_AL", f"2_SV_{cid}_STATUS", "low level may trigger drain/fill logic"),
-                # Drain solenoid affects return flow
-                (f"2_SV_{cid}_STATUS", "3_FIT_001_PV", "consumer drain solenoid affects return flow"),
-                # Flow is integrated by totalizer
-                (f"2_FIC_{cid}_PV", f"2_FQ_{cid}_PV", "flow rate is integrated into total volume"),
-            ])
-        
-        # --- Add Granger Causality Edges ---
-        granger_edges_path = os.path.join(os.path.dirname(__file__), 'granger_causality_edges.json')
-        if os.path.exists(granger_edges_path):
-            print(f"Loading Granger causality edges from {granger_edges_path}", flush=True)
-            with open(granger_edges_path, 'r') as f:
-                granger_edges = json.load(f)
+        consumer_ids = ["101","201","301","401","501","601"]
+        for cid in consumer_ids:
+            # Flow controller loop
+            relationships.append(
+                (f"2_FIC_{cid}_PV", f"2_FIC_{cid}_CO",
+                 f"Consumer {cid}: flow PV → controller CO"))
+            relationships.append(
+                (f"2_FIC_{cid}_CO", f"2_MCV_{cid}_CO",
+                 f"Consumer {cid}: controller CO → modulating valve MCV{cid}"))
+            relationships.append(
+                (f"2_MCV_{cid}_CO", f"2_FIC_{cid}_PV",
+                 f"Consumer {cid}: valve MCV{cid} → flow PV"))
             
-            # Use a set of frozensets for efficient duplicate checking of existing relationships
-            existing_edges = {frozenset({r[0], r[1]}) for r in relationships}
+            # Main elevated‐tank feed valve to this branch
+            relationships.append(
+                (f"2_MV_{cid}_STATUS", f"2_FIC_{cid}_PV",
+                 f"Elevated‐tank valve MV{cid} → branch flow PV"))
             
-            added_granger_count = 0
-            for source, target, description in granger_edges:
-                # Filter out edges involving excluded components
-                if source in self.remove_list or target in self.remove_list:
-                    continue
-                
-                # Filter out AIT-related edges to reduce complexity
-                if "_AIT_" in source or "_AIT_" in target:
-                    continue
-
-                # Filter to only include edges with the lowest p-value
-                if "(P-value: 0.0000)" not in description:
-                    continue
-
-                # NEW: Only add edges that connect different subsystems
-                source_subsystem = self.component_to_subsystem.get(source)
-                target_subsystem = self.component_to_subsystem.get(target)
-                if source_subsystem is None or target_subsystem is None or source_subsystem == target_subsystem:
-                    continue
-                
-                # Check for duplicates before adding
-                edge_frozenset = frozenset({source, target})
-                if edge_frozenset not in existing_edges:
-                    relationships.append((source, target, description))
-                    existing_edges.add(edge_frozenset)
-                    added_granger_count += 1
-            print(f"Added {added_granger_count} new, unique edges from Granger causality analysis.", flush=True)
+            # Level‐switch interlocks on isolation valve (MV)
+            relationships.append(
+                (f"2_LS_{cid}_AH", f"2_MV_{cid}_STATUS",
+                 f"Consumer {cid}: high level trips MV{cid}"))
+            relationships.append(
+                (f"2_LS_{cid}_AL", f"2_MV_{cid}_STATUS",
+                 f"Consumer {cid}: low level trips MV{cid}"))
+            
+            # Level‐switch to drain solenoid (SV)
+            relationships.append(
+                (f"2_LS_{cid}_AH", f"2_SV_{cid}_STATUS",
+                 f"Consumer {cid}: high level opens drain SV{cid}"))
+            relationships.append(
+                (f"2_LS_{cid}_AL", f"2_SV_{cid}_STATUS",
+                 f"Consumer {cid}: low level may trigger SV{cid}"))
+            
+            # Drain solenoid → return‐line flow meter in Stage 3
+            relationships.append(
+                (f"2_SV_{cid}_STATUS", "3_FIT_001_PV",
+                 f"SV{cid} → return‐line flow FIT001"))
+            
+            # Consumer flow totalizer (FQ)
+            relationships.append(
+                (f"2_FIC_{cid}_PV", f"2_FQ_{cid}_PV",
+                 f"Consumer {cid}: flow PV → totalizer FQ{cid}"))
 
         return relationships
         
@@ -220,14 +218,6 @@ class WADIComplex:
                 if edge_frozenset not in self.complex.cells:
                     self.complex.add_cell([source, target], rank=1, name=f"{source}_{target}", description=description)
                     added_count += 1
-            # This part is too verbose, let's remove it for cleaner output
-            # else:
-            #     if source not in unique_components:
-            #         # print(f"  Warning: Source component '{source}' not found. Skipping edge [{source}, {target}].")
-            #         pass
-            #     if target not in unique_components:
-            #         # print(f"  Warning: Target component '{target}' not found. Skipping edge [{source}, {target}].")
-            #         pass
         
         print(f"Successfully added {added_count} unique component relationships.", flush=True)
             

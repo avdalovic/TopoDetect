@@ -5,6 +5,18 @@ experiment_name: "swat_improved_ccann"
 project_name: "TopoDetect"
 entity: "avdalovica"
 
+# -- Dataset Configuration --
+dataset_name: "SWAT"  # Dataset name for attack indices (e.g., "SWAT", "WADI", "TEP")
+level_names: ["Nodes", "Edges", "PLCs"]  # Custom names for topological levels
+
+# Example for WADI dataset:
+# dataset_name: "WADI"
+# level_names: ["Sensors", "Actuators", "Controllers"]
+
+# Example for TEP dataset:
+# dataset_name: "TEP"  
+# level_names: ["Variables", "Connections", "Units"]
+
 # -- Data Settings --
 data:
   dataset: "SWAT" # Options: SWAT, WADI, TEP
@@ -49,10 +61,17 @@ anomaly_detection:
 
 # -- Evaluation Settings --
 evaluation:
-  evaluation_method: "threshold" # "threshold" or "cusum"
+  method: threshold  # 'threshold' or 'cusum'
+  threshold_percentile: 99.0
+  fp_alarm_window_seconds: 60
   cusum_S: 1.42
   cusum_G: 5.98
-  fp_alarm_window: 60
+
+# -- Enhanced Time-Aware Metrics Settings --
+enhanced_time_aware_metrics:
+  theta_p: 0.5          # Detection threshold for precision (default: 0.5)
+  theta_r: 0.1          # Detection threshold for recall (default: 0.1)
+  original_sample_hz: 1  # Original sampling frequency in Hz (SWAT: 1 Hz, WADI: 1 Hz)
 
 # -- System Settings --
 system:

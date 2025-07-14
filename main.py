@@ -31,7 +31,12 @@ def main(args):
     model_name = config['model']['name']
     
     if model_name == 'AnomalyCCANN':
-        from src.pipelines.swat_pipeline import run_experiment
+        # Check if it's WADI or SWAT dataset
+        dataset_name = config.get('dataset_name', 'SWAT')
+        if dataset_name == 'WADI':
+            from src.pipelines.wadi_pipeline import run_experiment
+        else:
+            from src.pipelines.swat_pipeline import run_experiment
     elif model_name == 'ARIMA':
         from src.pipelines.arima_pipeline import run_experiment
     elif model_name == 'LSTM_VAE':

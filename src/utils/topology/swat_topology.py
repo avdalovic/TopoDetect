@@ -31,6 +31,7 @@ class SWATComplex:
         """Define specific component relationships based on process knowledge"""
         relationships = [
             # Stage 1: Raw Water Stage
+            ("MV101", "LIT101", "valve 101 to level sensor"),
             ("MV101", "FIT101", "valve affects flow"),
             ("FIT101", "LIT101", "flow affects level"),
             ("LIT101", "P101", "tank level influences pump"),
@@ -40,6 +41,7 @@ class SWATComplex:
             ("P102", "FIT201", "backup pump 2 to stage 2 flow meter"),
             ("P102", "MV201", "backup pump 2 to valve 201"),
             # Stage 2: Chemical Dosing
+            ("FIT201", "MV201", "flow affects valve in stage 2"),
             ("FIT201", "AIT202", "flow affects pH reading"),
             ("FIT201", "AIT201", "flow affects conductivity reading"),
             ("FIT201", "AIT203", "flow affects ORP reading"),
@@ -64,6 +66,8 @@ class SWATComplex:
 
             
             # Stage 3: Ultrafiltration
+            ("MV301", "LIT301", "valve 301 to level sensor"),
+            ("MV301", "FIT301", "valve 301 to flow sensor"),
             ("LIT301", "P302", "T301 level controls pump"),
             ("LIT301", "P301", "T301 level controls  backup pump"),
             ("FIT301", "LIT301", "flow affects T301 level"),
@@ -74,8 +78,16 @@ class SWATComplex:
             ("MV303", "FIT301", "backwash drain valve affects flow"),
             ("MV304", "FIT301", "UF drain valve affects flow"),
             ("MV302", "LIT401", "water from uf to next stage"),
+            ("LIT301", "MV101", "level affects backwash flow"),
             
             # Stage 4: Dechlorination
+            ("FIT401", "MV401", "flow affects valve in stage 4"),
+            ("FIT401", "AIT401", "flow affects conductivity reading"),
+            ("FIT401", "AIT402", "flow affects ORP reading"),
+            ("FIT401", "AIT403", "flow affects pH reading"),
+            ("FIT401", "AIT404", "flow affects hardness reading"),
+            ("FIT401", "AIT405", "flow affects turbidity reading"),
+            ("FIT401", "AIT406", "flow affects temperature reading"),
             ("LIT401", "P401", "tank level controls backup dechlorination"),
             ("LIT401", "P402", "tank level controls  dechlorination"),
             ("P402", "FIT401", "pump affects flow"),
@@ -96,7 +108,8 @@ class SWATComplex:
             ("FIT401", "AIT401", "flow affects hardness reading"),
             ("UV401", "P403", "UV output triggers NaHSO3 dosing"),
             ("UV401", "P404", "UV output triggers backup NaHSO3 dosing"),
-
+            ("AIT402", "AIT502", "ORP to ORP monitoring"),
+            ("AIT401", "AIT501", "conductivity to conductivity monitoring"),
 
             # Stage 5: Reverse Osmosis
             ("P501", "PIT501", "pump to RO affects RO feed pressure"),

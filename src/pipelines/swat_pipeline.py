@@ -395,6 +395,14 @@ def run_experiment(config):
     # Correction: Rename 'fp_alarm_window_seconds' to 'fp_alarm_window'
     if 'fp_alarm_window_seconds' in eval_config:
         eval_config['fp_alarm_window'] = eval_config.pop('fp_alarm_window_seconds')
+    
+    # Add enhanced time-aware metrics parameters
+    enhanced_metrics_config = config.get('enhanced_time_aware_metrics', {})
+    eval_config.update({
+        'theta_p': enhanced_metrics_config.get('theta_p', 0.5),
+        'theta_r': enhanced_metrics_config.get('theta_r', 0.1),
+        'original_sample_hz': enhanced_metrics_config.get('original_sample_hz', 1)
+    })
         
     trainer = AnomalyTrainer(
         model,
@@ -407,6 +415,10 @@ def run_experiment(config):
         grad_clip_value=float(config['training']['grad_clip_value']),
         # Pass sample rate for proper attack index adjustment
         sample_rate=float(config['data']['sample_rate']),
+        # Pass dataset name for attack indices
+        dataset_name=config.get('dataset_name', 'SWAT'),
+        # Pass custom level names if specified
+        level_names=config.get('level_names', None),
         # Pass the corrected evaluation config block
         **eval_config
     )
