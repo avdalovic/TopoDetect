@@ -31,6 +31,12 @@ pip install torch-cluster -f https://data.pyg.org/whl/torch-2.0.0+${CUDA}.html
 nvidia-smi
 ```
 
+**Install system dependencies (required for PyTorch geometric):**
+```bash
+sudo apt update
+sudo apt install build-essential
+```
+
 **Select the appropriate CUDA version for PyTorch:**
 - CUDA 12.1+ → use `cu121`
 - CUDA 11.8 → use `cu118`  
@@ -49,6 +55,11 @@ pip install torch-cluster -f https://data.pyg.org/whl/torch-2.0.0+cu121.html
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 python -c "import torch; print(f'CUDA device: {torch.cuda.get_device_name(0)}')"
 ```
+
+**Troubleshooting:**
+- If you get `g++` compiler errors, install build tools: `sudo apt install build-essential`
+- If CUDA versions don't match, adjust the `cu###` suffix accordingly
+- For compilation issues, you may also need: `sudo apt install cmake ninja-build`
 
 Alternatively, you can install all dependencies using:
 
