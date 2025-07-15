@@ -125,17 +125,11 @@ def get_attack_indices(dataset_name):
 	elif dataset_name == "TEP":
 
 		attacks = [
-			np.arange(18000, 20000),       # Attack 1
-			np.arange(38000, 40000),     # Attack 2 
-			np.arange(58000, 60000),     # Attack 3
-			np.arange(78000, 80000)     # Attack 4
+			np.arange(10000, 14000),       # Attack 1: cons_p2s_s1 (A Feed)
 		]
 
 		true_labels = [
-			["Reactor Temperature"],
-			["Reactor Temperature"],
-			["Reactor Temperature"],
-			["Reactor Temperature"]
+			["A Feed"],  # Attack 1: constant +2sigma attack on A Feed sensor
 		]
 
 	else:
@@ -334,6 +328,28 @@ WADI_SUB_MAP = {
 		'3_FIT_001_PV', '3_LS_001_AL', '3_LT_001_PV', '3_MV_001_STATUS', '3_MV_002_STATUS', '3_MV_003_STATUS', '3_P_001_STATUS', '3_P_002_STATUS', '3_P_003_STATUS', '3_P_004_STATUS']
 }
 
+# TEP column names: First 41 are sensors (s1-s41), last 12 are actuators (a1-a12)
+TEP_COLUMN_NAMES = [
+	'A Feed', 'D Feed', 'E Feed', 'A and C Feed', 'Recycle Flow', 'Reactor Feed Rate', 'Reactor Pressure', 'Reactor Level', 'Reactor Temperature', 'Purge Rate',
+	'Product Sep Temp', 'Product Sep Level', 'Product Sep Pressure', 'Product Sep Underflow', 'Stripper Level', 'Stripper Pressure', 'Stripper Underflow', 'Stripper Temp', 'Stripper Steam Flow', 'Compressor Work',
+	'Reactor Coolant Temp', 'Separator Coolant Temp', 'Comp A to Reactor', 'Comp B to Reactor', 'Comp C to Reactor', 'Comp D to Reactor', 'Comp E to Reactor', 'Comp F to Reactor', 'Comp A in Purge', 'Comp B in Purge',
+	'Comp C in Purge', 'Comp D in Purge', 'Comp E in Purge', 'Comp F in Purge', 'Comp G in Purge', 'Comp H in Purge', 'Comp D in Product', 'Comp E in Product', 'Comp F in Product', 'Comp G in Product', 'Comp H in Product',
+	'D Feed (MV)', 'E Feed (MV)', 'A Feed (MV)', 'A and C Feed (MV)', 'Recycle (MV)', 'Purge (MV)', 'Separator (MV)', 'Stripper (MV)', 'Steam (MV)', 'Reactor Coolant (MV)', 'Condenser Coolant (MV)', 'Agitator (MV)'
+]
+
+TEP_SUB_MAP = {
+	'Reactor': ['A Feed', 'A and C Feed', 'Reactor Feed Rate', 'Reactor Pressure', 'Reactor Level', 'Reactor Temperature', 'Reactor Coolant Temp', 'A Feed (MV)', 'A and C Feed (MV)', 'Reactor Coolant (MV)'],
+	'Separator': ['Product Sep Temp', 'Product Sep Level', 'Product Sep Pressure', 'Product Sep Underflow', 'Separator Coolant Temp', 'Separator (MV)'],
+	'Stripper': ['Stripper Level', 'Stripper Pressure', 'Stripper Underflow', 'Stripper Temp', 'Stripper Steam Flow', 'Stripper (MV)', 'Steam (MV)'],
+	'Feeds': ['A Feed', 'D Feed', 'E Feed', 'A and C Feed', 'D Feed (MV)', 'E Feed (MV)', 'A Feed (MV)', 'A and C Feed (MV)'],
+	'Recycle': ['Recycle Flow', 'Purge Rate', 'Recycle (MV)', 'Purge (MV)'],
+	'Compressor': ['Compressor Work', 'Condenser Coolant (MV)'],
+	'Compositions': ['Comp A to Reactor', 'Comp B to Reactor', 'Comp C to Reactor', 'Comp D to Reactor', 'Comp E to Reactor', 'Comp F to Reactor',
+					'Comp A in Purge', 'Comp B in Purge', 'Comp C in Purge', 'Comp D in Purge', 'Comp E in Purge', 'Comp F in Purge', 'Comp G in Purge', 'Comp H in Purge',
+					'Comp D in Product', 'Comp E in Product', 'Comp F in Product', 'Comp G in Product', 'Comp H in Product'],
+	'Actuators': ['Agitator (MV)']
+}
+
 def is_actuator(dataset, label):
 	
 	if dataset == 'SWAT':
@@ -347,7 +363,12 @@ def is_actuator(dataset, label):
 		else:
 			return False
 	elif dataset == 'TEP':
-		if label[0] == 'a':
+		# TEP actuators are indices 41-52 (columns with "(MV)" suffix)
+		# or if using s/a notation: a1-a12
+		if label in TEP_COLUMN_NAMES:
+			idx = TEP_COLUMN_NAMES.index(label)
+			return idx >= 41  # First 41 are sensors (0-40), rest are actuators (41-52)
+		elif len(label) >= 2 and label[0] == 'a':
 			return True
 		else:
 			return False
@@ -418,6 +439,36 @@ def subsample(data, num_to_sample):
 
 	shuffle_idx = np.random.permutation(len(data))[:num_to_sample]
 	return data[shuffle_idx]
+
+def sen_to_idx(sensor):
+	"""Convert TEP sensor notation (s1, a1) to column index"""
+	sensor_type = sensor[0]
+	sensor_value = int(sensor[1:])
+
+	if sensor_type == 'a':
+		return sensor_value + 40
+	elif sensor_type == 's':
+		return sensor_value - 1
+
+def idx_to_sen(idx):
+	"""Convert TEP column index to sensor notation (s1, a1)"""
+	if idx >= 41:
+		return f'a{idx-40}'
+	return f's{idx+1}'
+
+def tep_column_to_sensor_notation(column_name):
+	"""Convert TEP full column name to sensor notation (s1, a1)"""
+	if column_name in TEP_COLUMN_NAMES:
+		idx = TEP_COLUMN_NAMES.index(column_name)
+		return idx_to_sen(idx)
+	return None
+
+def tep_sensor_notation_to_column(sensor_notation):
+	"""Convert TEP sensor notation (s1, a1) to full column name"""
+	idx = sen_to_idx(sensor_notation)
+	if 0 <= idx < len(TEP_COLUMN_NAMES):
+		return TEP_COLUMN_NAMES[idx]
+	return None
 
 def adjust_attack_indices_for_sampling(attacks, original_length, sampled_length, sample_rate):
     """

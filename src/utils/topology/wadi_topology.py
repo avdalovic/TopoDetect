@@ -52,6 +52,10 @@ class WADIComplex:
             # Raw water comes in through MV001, is metered by FIT001, and fills Tank1 (LT001)
             ("1_MV_001_STATUS", "1_FIT_001_PV", "inlet valve → inflow meter"),
             ("1_FIT_001_PV",   "1_LT_001_PV",  "inflow meter → tank level"),
+            ("1_FIT_001_PV",   "1_AIT_001_PV",  "Inflow→conductivity"),
+            ("1_LT_001_PV",    "1_AIT_001_PV",  "Level→conductivity"),
+            ("1_FIT_001_PV",   "1_AIT_002_PV",  "Inflow→turbidity"),
+            ("1_LT_001_PV",    "1_AIT_002_PV",  "Level→turbidity"),
 
             
             # When LT001 drops below low‐level, LS_001/LS_002 alarm and shut off pumps & valve
@@ -61,12 +65,14 @@ class WADIComplex:
             ("1_LS_001_AL", "1_P_002_STATUS", "low level alarm → shut off pump P2"),
             ("1_LS_002_AL", "1_P_001_STATUS", "low level alarm 2 → shut off pump P1"),
             ("1_LS_002_AL", "1_P_002_STATUS", "low level alarm 2 → shut off pump P2"),
+            ("1_LT_001_PV", "1_MV_001_STATUS", "tank level → shut off inlet valve"),
             ("1_LS_001_AL",  "1_MV_001_STATUS","alarm1 → shut off inlet valve"),
             ("1_LS_002_AL",  "1_MV_001_STATUS","alarm2 → shut off inlet valve"),
 
 
             ("1_P_005_STATUS", "2_MV_001_STATUS", "transfer pump P005 → Stage2 inlet valve"),
             ("1_P_005_STATUS", "2_MV_003_STATUS", "transfer pump P005 → Stage2 inlet valve"),
+            ("1_LT_001_PV", "2_MV_003_STATUS", "tank level → Stage2 inlet valve"),
             ("1_P_005_STATUS", "2_FIT_001_PV",    "transfer pump P005 → Stage2 flow meter"),
 
             # Circulation Pumps (keep tank mixed)
@@ -81,6 +87,12 @@ class WADIComplex:
             # Flow → tank level  
             ("2_FIT_001_PV", "2_LT_001_PV", "Flow FIT001 → level LT001"),
             ("2_FIT_002_PV", "2_LT_002_PV", "Flow FIT002 → level LT002"),
+
+            # Tank level → AIT
+            ("2_LT_001_PV",    "2_AIT_001_PV", "Level→conductivity"),
+            ("2_FIT_001_PV",   "2_AIT_001_PV", "Inflow→conductivity"), 
+            ("2_LT_002_PV",    "2_AIT_002_PV", "Level→turbidity"),
+            ("2_FIT_002_PV",   "2_AIT_002_PV", "Inflow→turbidity"),
 
             # Tank level → head pressure sensor
             ("2_LT_001_PV", "2_PIT_001_PV", "Level LT001 → head pressure PIT001"),
@@ -111,7 +123,11 @@ class WADIComplex:
             ("2_P_003_SPEED", " 2_PIT_002_PV", "Pump speed affects discharge pressure"),
             ("2_P_004_SPEED", " 2_PIT_002_PV", "Pump speed affects discharge pressure"),
 
+            ("2_PIC_003_SP",  "2_PIC_003_PV",  "Setpoint→process value"),
+            ("2_PIC_003_SP",  "2_PIC_003_CO",  "Setpoint→control output"),
 
+
+            
 
 
             # 3. Return (Stage 3) & Cross-Subsystem links
@@ -130,8 +146,44 @@ class WADIComplex:
 
             ("3_P_003_STATUS", "3_MV_002_STATUS", "Pump P003 → backwash valve MV002"),
             ("3_P_004_STATUS", "3_MV_002_STATUS", "Pump P004 → backwash valve MV002"),
-            ("3_MV_002_STATUS", "1_FIT_001_PV", "Backwash valve MV002 → Stage1 inflow meter FIT001")
+            ("3_MV_002_STATUS", "1_FIT_001_PV", "Backwash valve MV002 → Stage1 inflow meter FIT001"),
+            ("3_P_003_STATUS", "1_FIT_001_PV", "Pump P003 → Stage1 inflow meter FIT001"),
+            ("3_P_004_STATUS", "1_FIT_001_PV", "Pump P004 → Stage1 inflow meter FIT001")
         ]
+
+        # ─── Stage 1: Raw‐Water Tank → Quality Sensors ───
+        # For each 1_AIT_00x, connect both the inflow meter and the tank‐level sensor:
+
+        for ait in ["001","002","003","004","005"]:
+            relationships.extend([
+                # Inflow → quality
+                (f"1_FIT_001_PV", f"1_AIT_{ait}_PV",
+                 f"Inflow FIT001 → quality sensor AIT{ait}"),
+                # Level  → quality
+                (f"1_LT_001_PV",  f"1_AIT_{ait}_PV",
+                 f"Tank level LT001 → quality sensor AIT{ait}")
+            ])
+
+
+        # ─── Stage 2: Elevated Reservoir → Quality Sensors ───
+        # For each 2A_AIT_00x, connect the two inflow FITs and the two level LTs:
+
+        for ait in ["001","002","003","004"]:
+            relationships.extend([
+                # FIT001 → quality
+                (f"2_FIT_001_PV", f"2A_AIT_{ait}_PV",
+                 f"Inflow FIT001 → quality sensor 2A_AIT{ait}"),
+                # FIT002 → quality
+                (f"2_FIT_002_PV", f"2A_AIT_{ait}_PV",
+                 f"Inflow FIT002 → quality sensor 2A_AIT{ait}"),
+                # LT001  → quality
+                (f"2_LT_001_PV",  f"2A_AIT_{ait}_PV",
+                 f"Level LT001 → quality sensor 2A_AIT{ait}"),
+                # LT002  → quality
+                (f"2_LT_002_PV",  f"2A_AIT_{ait}_PV",
+                 f"Level LT002 → quality sensor 2A_AIT{ait}")
+            ])
+
         
         # ─── Consumer Lines (Branches 101…601) ───
 
@@ -178,6 +230,9 @@ class WADIComplex:
             relationships.append(
                 (f"2_FIC_{cid}_PV", f"2_FQ_{cid}_PV",
                  f"Consumer {cid}: flow PV → totalizer FQ{cid}"))
+            relationships.append(
+                (f"2_FQ_{cid}_PV", f"2_FIC_{cid}_PV",
+                 f"Consumer {cid}: totalizer FQ{cid} → flow PV"))
 
         return relationships
         
