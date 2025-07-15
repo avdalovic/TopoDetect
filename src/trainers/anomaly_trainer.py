@@ -9,7 +9,12 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
 # New imports for CUSUM and advanced metrics
-from src.utils.cusum import CUSUM
+try:
+    from src.utils.cusum import CUSUM
+    CUSUM_AVAILABLE = True
+except ImportError:
+    CUSUM_AVAILABLE = False
+    print("Warning: CUSUM not available. Only threshold method will work.")
 from src.utils.metrics import (
     calculate_standard_metrics, calculate_scenario_detection,
     calculate_fp_alarms, calculate_time_aware_metrics
@@ -95,6 +100,8 @@ class AnomalyTrainer:
         print(f"Level names: {self.level_names}")
         print(f"Evaluation Method: {self.evaluation_method}")
         if self.evaluation_method == 'cusum':
+            if not CUSUM_AVAILABLE:
+                raise ImportError("CUSUM method selected but CUSUM module not available. Use 'threshold' method instead.")
             print(f"CUSUM Params: S={self.cusum_S}, G={self.cusum_G}")
         else:
             print(f"Threshold method: {threshold_method}")
