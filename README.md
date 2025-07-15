@@ -24,6 +24,32 @@ pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.0.1+$
 pip install torch-cluster -f https://data.pyg.org/whl/torch-2.0.0+${CUDA}.html
 ```
 
+### GPU Setup
+
+**Check your CUDA version first:**
+```bash
+nvidia-smi
+```
+
+**Select the appropriate CUDA version for PyTorch:**
+- CUDA 12.1+ → use `cu121`
+- CUDA 11.8 → use `cu118`  
+- CUDA 11.7 → use `cu117`
+- No GPU → use `cpu`
+
+**Example for CUDA 12.4 (RTX A6000):**
+```bash
+pip install torch==2.0.1 --extra-index-url https://download.pytorch.org/whl/cu121
+pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.0.1+cu121.html
+pip install torch-cluster -f https://data.pyg.org/whl/torch-2.0.0+cu121.html
+```
+
+**Verify GPU setup:**
+```bash
+python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+python -c "import torch; print(f'CUDA device: {torch.cuda.get_device_name(0)}')"
+```
+
 Alternatively, you can install all dependencies using:
 
 ```bash
