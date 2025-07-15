@@ -1,6 +1,6 @@
 # TopoDetect: A Topological Deep Learning Framework for Anomaly Detection in ICS Networks
 
-This research project implements a novel approach to anomaly detection in industrial control systems using topological deep learning techniques. The system is evaluated on the SWAT (Secure Water Treatment), WADI, and TEP datasets.
+This research project implements a novel approach to anomaly detection in industrial control systems using topological deep learning techniques. The system is evaluated on the SWAT (Secure Water Treatment), WADI (Water Distribution), and TEP (Tennessee Eastman Process) datasets.
 
 ## Environment Setup
 
@@ -31,9 +31,26 @@ pip install -r requirements.txt
 ```
 Ensure you install the correct PyTorch version for your system (CPU or GPU). See [PyTorch installation instructions](https://pytorch.org/get-started/locally/).
 
-## Dataset
+## Datasets
 
-The project expects the dataset CSV files (e.g., `SWATv0_train.csv`, `SWATv0_test.csv`) to be located in the directory specified in the configuration file (e.g., `data/SWAT`).
+The project supports three industrial control system datasets:
+
+### SWAT (Secure Water Treatment)
+- Files: `SWATv0_train.csv`, `SWATv0_test.csv`
+- Location: `data/SWAT/`
+- 51 sensors and actuators across 6 process stages
+
+### WADI (Water Distribution)
+- Files: `WADI_train.csv`, `WADI_test.csv`
+- Location: `data/WADI/`
+- 127 sensors and actuators across 5 subsystems
+
+### TEP (Tennessee Eastman Process)
+- Files: `TEP_train.csv`, `TEP_test_cons_p2s_s1.csv`
+- Location: `data/TEP/`
+- 53 sensors and actuators in chemical process simulation
+
+Each dataset should be placed in its respective directory as specified in the configuration file.
 
 ## Usage
 
@@ -41,10 +58,17 @@ The main entry point for all experiments is `main.py`. The behavior of the scrip
 
 **Basic Usage:**
 ```bash
+# Run SWAT experiment
 python main.py --config config.yaml
+
+# Run WADI experiment
+python main.py --config config_wadi.yaml
+
+# Run TEP experiment (when implemented)
+python main.py --config config_tep.yaml
 ```
 
-The `config.yaml` file centralizes all hyperparameters and settings for the experiment, including:
+The configuration file centralizes all hyperparameters and settings for the experiment, including:
 - System settings (device, checkpoint directory)
 - Data parameters (dataset name, paths, sampling rates)
 - Model architecture (layer configurations, temporal mode)
@@ -69,26 +93,39 @@ The script will:
 
 ```
 TDS_ICS_project/
-├── configs/              # Experiment configuration files (.yaml)
+├── config.yaml           # SWAT experiment configuration
+├── config_wadi.yaml      # WADI experiment configuration
+├── configs/              # Additional experiment configurations
 ├── data/                 # Raw and processed data
-│   ├── SWAT/
-│   └── ...
+│   ├── SWAT/            # SWAT dataset files
+│   ├── WADI/            # WADI dataset files
+│   └── TEP/             # TEP dataset files
 ├── main.py               # Main script to run experiments
 ├── README.md
 ├── requirements.txt
 ├── saved_test_data/      # Cached test data to speed up runs
 ├── src/                  # Source code
-│   ├── datasets/         # Dataset classes (e.g., SWaTDataset)
-│   ├── models/           # Model architectures (e.g., AnomalyCCANN)
-│   ├── pipelines/        # Experiment-specific pipelines (e.g., swat_pipeline)
-│   ├── trainers/         # Training and evaluation logic
-│   └── utils/            # Utility functions (e.g., topology builders)
+│   ├── datasets/         # Dataset classes (SWaTDataset, WADIDataset, etc.)
+│   ├── models/           # Model architectures (AnomalyCCANN, etc.)
+│   ├── pipelines/        # Dataset-specific pipelines (swat_pipeline, wadi_pipeline)
+│   ├── trainers/         # Training and evaluation logic with wandb integration
+│   └── utils/            # Utility functions (topology builders, attack utils)
 └── wandb/                # Wandb local logs
 ```
 
 ## Model Architecture
 
-TopoGuard uses a Combinatorial Complex Attention Neural Network with:
-- HMC layers for message passing across different topological dimensions
+TopoDetect uses a Combinatorial Complex Attention Neural Network (AnomalyCCANN) with:
+- HMC layers for message passing across different topological dimensions (0-cells, 1-cells, 2-cells)
 - An encoder-decoder architecture for anomaly detection
 - Component-level anomaly localization capability
+- Support for both reconstruction and temporal prediction modes
+
+## Features
+
+- **Multi-Dataset Support**: SWAT, WADI, and TEP datasets with dataset-specific preprocessing
+- **Comprehensive Logging**: Integration with Weights & Biases for experiment tracking
+- **Advanced Metrics**: Time-aware precision, recall, and F1 scores (eTaP, eTaR, eTaF1)
+- **Visualization**: Attack detection timelines, reconstruction error plots, and localization maps
+- **Flexible Configuration**: YAML-based configuration system for easy experiment management
+- **Attack Analysis**: Individual attack scenario analysis with detailed performance metrics
