@@ -22,6 +22,9 @@ pip install topomodelx
 pip install torch==2.0.1 --extra-index-url https://download.pytorch.org/whl/${CUDA}
 pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.0.1+${CUDA}.html
 pip install torch-cluster -f https://data.pyg.org/whl/torch-2.0.0+${CUDA}.html
+
+# Install additional dependencies
+pip install wandb PyYAML
 ```
 
 ### GPU Setup
@@ -60,6 +63,30 @@ python -c "import torch; print(f'CUDA device: {torch.cuda.get_device_name(0)}')"
 - If you get `g++` compiler errors, install build tools: `sudo apt install build-essential`
 - If CUDA versions don't match, adjust the `cu###` suffix accordingly
 - For compilation issues, you may also need: `sudo apt install cmake ninja-build`
+
+### Weights & Biases Setup
+
+The project uses [Weights & Biases (wandb)](https://wandb.ai) for experiment tracking and logging.
+
+**Setup wandb account:**
+1. Create a free account at [wandb.ai](https://wandb.ai)
+2. Get your API key from [wandb.ai/settings](https://wandb.ai/settings)
+3. Login to wandb:
+```bash
+wandb login
+# Enter your API key when prompted
+```
+
+**Configure wandb entity:**
+- Update the `entity` field in your config files (`config.yaml`, `config_tep.yaml`, etc.)
+- Set it to your wandb username or team name
+
+**Running without wandb account:**
+If you don't have a wandb account, you can run in offline mode:
+```bash
+wandb offline
+python main.py --config config_tep.yaml
+```
 
 Alternatively, you can install all dependencies using:
 
