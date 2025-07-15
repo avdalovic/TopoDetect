@@ -345,6 +345,10 @@ def run_experiment(config):
     if 'fp_alarm_window_seconds' in eval_config:
         eval_config['fp_alarm_window'] = eval_config.pop('fp_alarm_window_seconds')
     
+    # Remove threshold_percentile from eval_config to avoid duplicate parameter
+    if 'threshold_percentile' in eval_config:
+        eval_config.pop('threshold_percentile')
+    
     # Add enhanced time-aware metrics parameters
     enhanced_metrics_config = config.get('enhanced_time_aware_metrics', {})
     eval_config.update({
@@ -368,6 +372,12 @@ def run_experiment(config):
         dataset_name=config.get('dataset_name', 'WADI'),
         # Pass custom level names if specified
         level_names=config.get('level_names', None),
+        # Pass anomaly detection config
+        temporal_consistency=config.get('anomaly_detection', {}).get('temporal_consistency', 1),
+        threshold_method=config.get('anomaly_detection', {}).get('threshold_method', 'percentile'),
+        threshold_percentile=config.get('anomaly_detection', {}).get('threshold_percentile', 99.0),
+        sd_multiplier=config.get('anomaly_detection', {}).get('sd_multiplier', 2.5),
+        use_component_thresholds=config.get('anomaly_detection', {}).get('use_component_thresholds', False),
         # Pass the corrected evaluation config block
         **eval_config
     )

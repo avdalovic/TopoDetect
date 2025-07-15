@@ -15,7 +15,7 @@ data:
   data_dir: "data/WADI"
   train_path: "WADI_train.csv"
   test_path: "WADI_test.csv"
-  sample_rate: 0.1
+  sample_rate: 0.2
   validation_split_ratio: 0.2
   temporal_mode: False # False for reconstruction, True for temporal prediction
   temporal_sample_rate: 1 # Subsample data for temporal mode. 1 = no sampling.
@@ -44,7 +44,11 @@ training:
 
 # -- Anomaly Detection Parameters --
 anomaly_detection:
+  threshold_method: "percentile" # or "mean_sd"
   threshold_percentile: 99.0
+  sd_multiplier: 2.5
+  use_component_thresholds: False
+  temporal_consistency: 6
 
 # -- Evaluation Parameters --
 evaluation:

@@ -67,6 +67,7 @@ class AnomalyTrainer:
         self.threshold_percentile = threshold_percentile
         self.sd_multiplier = sd_multiplier 
         self.use_component_thresholds = use_component_thresholds
+        self.temporal_consistency = temporal_consistency
         
         # CUSUM parameters
         self.evaluation_method = evaluation_method
@@ -75,6 +76,9 @@ class AnomalyTrainer:
         self.fp_alarm_window = fp_alarm_window
         self.cusum_detector = None # Will be initialized during calibration
         self.anomaly_threshold = None # To be calibrated for threshold method
+        
+        # Temporal consistency buffer for tracking recent predictions
+        self.temporal_buffer = []
         
         # Enhanced time-aware metrics parameters
         self.theta_p = theta_p
@@ -114,7 +118,46 @@ class AnomalyTrainer:
         print(f"  original_sample_hz: {self.original_sample_hz}")
         print(f"  effective_sample_hz: {self.original_sample_hz * self.sample_rate:.4f}")
         print(f"  fp_alarm_window: {self.fp_alarm_window}s -> {int(self.fp_alarm_window * self.original_sample_hz * self.sample_rate)} points")
+        print(f"  temporal_consistency: {self.temporal_consistency} (require {self.temporal_consistency} consecutive anomalies)")
 
+    def apply_temporal_consistency(self, raw_prediction):
+        """
+        Apply temporal consistency filtering to reduce false positives.
+        Requires temporal_consistency consecutive anomalies to trigger detection.
+        
+        Parameters
+        ----------
+        raw_prediction : bool
+            Raw anomaly prediction for current timestep
+            
+        Returns
+        -------
+        bool
+            Filtered prediction after temporal consistency check
+        """
+        if self.temporal_consistency <= 1:
+            # No temporal filtering needed
+            return raw_prediction
+            
+        # Add current prediction to buffer
+        self.temporal_buffer.append(raw_prediction)
+        
+        # Keep buffer size to temporal_consistency length
+        if len(self.temporal_buffer) > self.temporal_consistency:
+            self.temporal_buffer.pop(0)
+            
+        # Check if we have enough consecutive anomalies
+        if len(self.temporal_buffer) >= self.temporal_consistency:
+            # Return True only if last temporal_consistency predictions are all anomalies
+            return all(self.temporal_buffer[-self.temporal_consistency:])
+        else:
+            # Not enough history, return False (conservative approach)
+            return False
+
+    def reset_temporal_buffer(self):
+        """Reset the temporal consistency buffer (call between test runs)."""
+        self.temporal_buffer = []
+        
     def to_device(self, x):
         """
         Move data to device, handling both dictionary and list inputs.
@@ -271,6 +314,13 @@ class AnomalyTrainer:
 
         if self.evaluation_method == 'cusum':
             self.cusum_detector.reset()
+            
+        # Reset temporal consistency buffer for evaluation
+        self.reset_temporal_buffer()
+        
+        # Store both raw and filtered predictions for comparison
+        all_y_pred_raw = []  # Without temporal consistency
+        all_y_pred_filtered = []  # With temporal consistency
 
         with torch.no_grad():
             for batch_idx, sample in enumerate(dataloader):
@@ -290,6 +340,7 @@ class AnomalyTrainer:
                     
                     # Get predictions for each item in the batch
                     batch_preds = []
+                    batch_preds_raw = []
                     batch_level_preds = {'level_0': [], 'level_1': [], 'level_2': []}
                     batch_component_errors = []
                     
@@ -302,20 +353,29 @@ class AnomalyTrainer:
                             # Aggregate feature dimension before passing to CUSUM
                             residual_per_feature = torch.mean(residuals_0[i], dim=1)
                             sensor_anomalies = self.cusum_detector.update(residual_per_feature)
-                            is_anomalous = torch.any(sensor_anomalies).item()
+                            raw_anomaly = torch.any(sensor_anomalies).item()
+                            # Store raw prediction
+                            batch_preds_raw.append(raw_anomaly)
+                            # Apply temporal consistency for filtered prediction
+                            is_anomalous = self.apply_temporal_consistency(raw_anomaly)
                             batch_preds.append(is_anomalous)
                             batch_level_preds['level_0'].append(is_anomalous)
                             batch_level_preds['level_1'].append(is_anomalous)  # Same for temporal mode
                             batch_level_preds['level_2'].append(is_anomalous)
                         else: # Simple threshold
                             error = torch.mean(residuals_0[i])
-                            is_anomalous = (error > self.anomaly_threshold_0).item()
+                            raw_anomaly = (error > self.anomaly_threshold_0).item()
+                            # Store raw prediction
+                            batch_preds_raw.append(raw_anomaly)
+                            # Apply temporal consistency for filtered prediction
+                            is_anomalous = self.apply_temporal_consistency(raw_anomaly)
                             batch_preds.append(is_anomalous)
                             batch_level_preds['level_0'].append(is_anomalous)
                             batch_level_preds['level_1'].append(is_anomalous)  # Same for temporal mode
                             batch_level_preds['level_2'].append(is_anomalous)
                             
                     all_y_pred.extend(batch_preds)
+                    all_y_pred_raw.extend(batch_preds_raw)
                     detailed_predictions.extend(batch_preds)
                     detailed_component_errors.extend(batch_component_errors)
                     
@@ -342,6 +402,7 @@ class AnomalyTrainer:
 
                     # Get predictions for each item in the batch
                     batch_preds = []
+                    batch_preds_raw = []
                     batch_level_preds = {'level_0': [], 'level_1': [], 'level_2': []}
                     batch_component_errors = []
                     
@@ -354,7 +415,11 @@ class AnomalyTrainer:
                             # For CUSUM, only use 0-cells
                             residual_per_feature = torch.mean(residuals_0[i], dim=1)
                             sensor_anomalies = self.cusum_detector.update(residual_per_feature)
-                            is_anomalous = torch.any(sensor_anomalies).item()
+                            raw_anomaly = torch.any(sensor_anomalies).item()
+                            # Store raw prediction
+                            batch_preds_raw.append(raw_anomaly)
+                            # Apply temporal consistency for filtered prediction
+                            is_anomalous = self.apply_temporal_consistency(raw_anomaly)
                             batch_preds.append(is_anomalous)
                             batch_level_preds['level_0'].append(is_anomalous)
                             batch_level_preds['level_1'].append(is_anomalous)  # Same for CUSUM
@@ -364,7 +429,7 @@ class AnomalyTrainer:
                             error_1 = torch.mean(residuals_1[i])
                             error_2 = torch.mean(residuals_2[i])
                             
-                            # Individual level predictions
+                            # Individual level predictions (without temporal consistency for now)
                             is_anomalous_0 = (error_0 > self.anomaly_threshold_0).item()
                             is_anomalous_1 = (error_1 > self.anomaly_threshold_1).item()
                             is_anomalous_2 = (error_2 > self.anomaly_threshold_2).item()
@@ -374,10 +439,15 @@ class AnomalyTrainer:
                             batch_level_preds['level_2'].append(is_anomalous_2)
                             
                             # Anomaly if ANY level exceeds its threshold
-                            is_anomalous = is_anomalous_0 or is_anomalous_1 or is_anomalous_2
+                            raw_anomaly = is_anomalous_0 or is_anomalous_1 or is_anomalous_2
+                            # Store raw prediction
+                            batch_preds_raw.append(raw_anomaly)
+                            # Apply temporal consistency to overall prediction
+                            is_anomalous = self.apply_temporal_consistency(raw_anomaly)
                             batch_preds.append(is_anomalous)
                             
                     all_y_pred.extend(batch_preds)
+                    all_y_pred_raw.extend(batch_preds_raw)
                     detailed_predictions.extend(batch_preds)
                     detailed_component_errors.extend(batch_component_errors)
                     
@@ -392,7 +462,8 @@ class AnomalyTrainer:
 
         # Convert lists to numpy arrays for metric calculations
         all_y_true = np.array(all_y_true)
-        all_y_pred = np.array(all_y_pred)
+        all_y_pred = np.array(all_y_pred)  # Filtered predictions (with temporal consistency)
+        all_y_pred_raw = np.array(all_y_pred_raw)  # Raw predictions (without temporal consistency)
         
         # Store detailed data for visualization (only for test evaluation)
         if eval_mode == "Test" or eval_mode == "Final Test":
@@ -425,8 +496,12 @@ class AnomalyTrainer:
             self.sample_rate
         )
 
+        # Calculate metrics for both raw and filtered predictions
         standard_metrics = calculate_standard_metrics(all_y_true, all_y_pred)
+        standard_metrics_raw = calculate_standard_metrics(all_y_true, all_y_pred_raw)
+        
         scenario_detection_rate = calculate_scenario_detection(all_y_true, all_y_pred, attacks)
+        scenario_detection_rate_raw = calculate_scenario_detection(all_y_true, all_y_pred_raw, attacks)
         
         # Use improved FPA calculation with proper sampling rate consideration
         fp_alarm_count = calculate_fp_alarms(
@@ -435,10 +510,23 @@ class AnomalyTrainer:
             sample_rate=self.sample_rate,
             original_sample_hz=self.original_sample_hz
         )
+        fp_alarm_count_raw = calculate_fp_alarms(
+            all_y_true, all_y_pred_raw, attacks, 
+            window_seconds=self.fp_alarm_window,
+            sample_rate=self.sample_rate,
+            original_sample_hz=self.original_sample_hz
+        )
         
         # Use enhanced time-aware metrics with proper parameters
         time_aware_metrics = calculate_time_aware_metrics(
             all_y_true, all_y_pred, attacks,
+            theta_p=self.theta_p,
+            theta_r=self.theta_r,
+            sample_rate=self.sample_rate,
+            original_sample_hz=self.original_sample_hz
+        )
+        time_aware_metrics_raw = calculate_time_aware_metrics(
+            all_y_true, all_y_pred_raw, attacks,
             theta_p=self.theta_p,
             theta_r=self.theta_r,
             sample_rate=self.sample_rate,
@@ -453,26 +541,49 @@ class AnomalyTrainer:
 
         # Log results to console
         print("\n--- Evaluation Results ---")
+        print(f"=== WITHOUT Temporal Consistency (Raw Predictions) ===")
+        print(f"Standard Precision: {standard_metrics_raw['precision']:.4f}")
+        print(f"Standard Recall:    {standard_metrics_raw['recall']:.4f}")
+        print(f"Standard F1-Score:  {standard_metrics_raw['f1']:.4f}")
+        print(f"Scenario Detection Rate: {scenario_detection_rate_raw:.4f} ({int(scenario_detection_rate_raw*len(attacks))}/{len(attacks)})")
+        print(f"False Positive Alarms:   {fp_alarm_count_raw}")
+        print(f"eTaP (Time-Aware Precision): {time_aware_metrics_raw['eTaP']:.4f}")
+        print(f"eTaR (Time-Aware Recall):    {time_aware_metrics_raw['eTaR']:.4f}")
+        print(f"eTaF1 (Time-Aware F1):       {time_aware_metrics_raw['eTaF1']:.4f}")
+        print("-" * 50)
+        print(f"=== WITH Temporal Consistency (temporal_consistency={self.temporal_consistency}) ===")
         print(f"Standard Precision: {standard_metrics['precision']:.4f}")
         print(f"Standard Recall:    {standard_metrics['recall']:.4f}")
-        print(f"Standard F1-Score:    {standard_metrics['f1']:.4f}")
-        print("-" * 25)
+        print(f"Standard F1-Score:  {standard_metrics['f1']:.4f}")
         print(f"Scenario Detection Rate: {scenario_detection_rate:.4f} ({int(scenario_detection_rate*len(attacks))}/{len(attacks)})")
         print(f"False Positive Alarms:   {fp_alarm_count}")
-        print("-" * 25)
-        print(f"eTaP (Time-Aware Precision): {time_aware_metrics['eTaP']:.4f}  # How precise detection is within time windows")
-        print(f"eTaR (Time-Aware Recall):    {time_aware_metrics['eTaR']:.4f}  # How well we detect attacks within time windows")
-        print(f"eTaF1 (Time-Aware F1):       {time_aware_metrics['eTaF1']:.4f}  # Harmonic mean of eTaP and eTaR")
-        print("-" * 25)
+        print(f"eTaP (Time-Aware Precision): {time_aware_metrics['eTaP']:.4f}")
+        print(f"eTaR (Time-Aware Recall):    {time_aware_metrics['eTaR']:.4f}")
+        print(f"eTaF1 (Time-Aware F1):       {time_aware_metrics['eTaF1']:.4f}")
+        print("-" * 50)
         print("Multi-Level Detection Results:")
         for i, level in enumerate(['level_0', 'level_1', 'level_2']):
             level_name = self.level_names[i] if i < len(self.level_names) else f'Level_{i}'
             print(f"{level_name} - P: {level_metrics[level]['precision']:.4f}, R: {level_metrics[level]['recall']:.4f}, F1: {level_metrics[level]['f1']:.4f}")
         print("--------------------------\n")
         
-        final_results = {**standard_metrics, **time_aware_metrics, 
-                         'scenario_detection_rate': scenario_detection_rate,
-                         'fp_alarms': fp_alarm_count}
+        final_results = {
+            # Filtered predictions (with temporal consistency)
+            **standard_metrics, **time_aware_metrics, 
+            'scenario_detection_rate': scenario_detection_rate,
+            'fp_alarms': fp_alarm_count,
+            # Raw predictions (without temporal consistency) - prefixed with 'raw_'
+            'raw_precision': standard_metrics_raw['precision'],
+            'raw_recall': standard_metrics_raw['recall'],
+            'raw_f1': standard_metrics_raw['f1'],
+            'raw_eTaP': time_aware_metrics_raw['eTaP'],
+            'raw_eTaR': time_aware_metrics_raw['eTaR'],
+            'raw_eTaF1': time_aware_metrics_raw['eTaF1'],
+            'raw_scenario_detection_rate': scenario_detection_rate_raw,
+            'raw_fp_alarms': fp_alarm_count_raw,
+            # Temporal consistency setting
+            'temporal_consistency': self.temporal_consistency
+        }
         
         # Add level-specific metrics
         for level in ['level_0', 'level_1', 'level_2']:

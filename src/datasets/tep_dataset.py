@@ -26,11 +26,6 @@ class TEPDataset(Dataset):
         temporal_sample_rate : int, default=1
             Rate at which to subsample temporal data. 1 means no subsampling.
         """
-        # Truncate data at 15000 points since attacks only go up to 14000
-        if len(data) > 15000:
-            print(f"TEP Dataset: Truncating data from {len(data)} to 15000 points (attacks end at 14000)")
-            data = data.iloc[:15000].copy()
-        
         self.data = data
         self.complex = tep_complex.get_complex()
         self.feature_dim_0 = feature_dim_0  # 0-cells: 3D
