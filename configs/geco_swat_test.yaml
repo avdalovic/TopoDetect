@@ -1,0 +1,72 @@
+# GECO SWAT Test Configuration
+# Testing GECO-learned relationships on 0.1 sample rate
+
+project_name: "esorics_geco_test"
+entity: "avdalovica"
+experiment_name: "geco_swat_test_01"
+dataset_name: "SWAT"
+
+# System configuration
+system:
+  device: "cuda"
+  checkpoint_dir: "checkpoints"
+
+# Data configuration
+data:
+  data_dir: "data/SWAT"
+  train_path: "SWATv0_train.csv"
+  test_path: "SWATv0_test.csv"
+  sample_rate: 0.1  # Small sample for testing
+  validation_split_ratio: 0.2
+  temporal_mode: false
+  temporal_sample_rate: 1
+
+# Topology configuration - NEW SECTION
+topology:
+  use_geco_relationships: true    # Use GECO-learned relationships
+  use_geco_features: true         # Use enhanced edge features with GECO info
+
+# Model configuration
+model:
+  name: "AnomalyCCANN"
+  channels_per_layer:
+    - [[3, 8, 3], [32, 32, 32], [64, 64, 64]]  # Updated for 8D edge features with GECO
+  original_feature_dims:
+    "0": 3  # 0-cells: 3D features
+    "1": 8  # 1-cells: 8D features (6D concatenated + 2D GECO)
+    "2": 3  # 2-cells: 3D features
+  temporal_mode: false
+  use_tcn: false
+  n_input: 10
+
+# Training configuration
+training:
+  epochs: 5
+  batch_size: 1
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  grad_clip_value: 1.0
+  test_interval: 1  # Changed from 5 to 1 to evaluate after each epoch
+  early_stopping:
+    enabled: true
+    patience: 10
+    min_delta: 0.001
+
+# Anomaly detection configuration
+anomaly_detection:
+  temporal_consistency: 3
+  threshold_method: "percentile"
+  threshold_percentile: 99.0
+  sd_multiplier: 2.5
+  use_component_thresholds: false
+
+# Evaluation configuration
+evaluation:
+  method: "threshold"  # Changed from "time_aware" to "threshold"
+  fp_alarm_window_seconds: 300
+
+# Enhanced time-aware metrics
+enhanced_time_aware_metrics:
+  theta_p: 0.5
+  theta_r: 0.1
+  original_sample_hz: 1 

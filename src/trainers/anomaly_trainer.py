@@ -290,10 +290,10 @@ class AnomalyTrainer:
             # Check if detector exists or is not calibrated
             if self.cusum_detector is None or not self.cusum_detector.is_calibrated:
                 needs_calibration = True
-        elif self.evaluation_method == 'threshold':
-            # Check if thresholds are initialized
-            if not hasattr(self, 'anomaly_threshold_0') or self.anomaly_threshold_0 is None:
-                needs_calibration = True
+        else:  # Default to threshold-based evaluation for all other methods
+            # Always recalibrate thresholds after each epoch since model parameters change
+            # and reconstruction error distributions shift as the model learns
+            needs_calibration = True
 
         if needs_calibration:
             self.calibrate()

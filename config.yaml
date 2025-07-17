@@ -23,7 +23,7 @@ data:
   data_dir: "data/SWAT"
   train_path: "SWATv0_train.csv"
   test_path: "SWATv0_test.csv"
-  sample_rate: 0.2
+  sample_rate: 0.005
   validation_split_ratio: 0.2
   temporal_mode: False # False for reconstruction, True for temporal prediction
   temporal_sample_rate: 1 # Subsample data for temporal mode. 1 = no sampling.
@@ -34,13 +34,13 @@ model:
   use_tcn: False # Whether to use TCN for temporal modeling
   n_input: 10 # For temporal mode
   channels_per_layer:
-    - - [3, 6, 4] # in_channels (0-cells: 3D, 1-cells: 6D, 2-cells: 4D)
+    - - [3, 6, 3] # in_channels (0-cells: 3D, 1-cells: 6D, 2-cells: 3D) 
       - [32, 32, 32] # intermediate_channels
       - [64, 64, 64] # final_channels
 
 # -- Training Settings --
 training:
-  epochs: 5
+  epochs: 2
   batch_size: 1 # HMC usually works with batch_size=1
   learning_rate: 0.001
   weight_decay: 1e-5
@@ -61,7 +61,7 @@ anomaly_detection:
 
 # -- Evaluation Settings --
 evaluation:
-  method: threshold  # 'threshold' or 'cusum'
+  method: "threshold"  # 'threshold' or 'cusum'
   threshold_percentile: 99.0
   fp_alarm_window_seconds: 60
   cusum_S: 1.42

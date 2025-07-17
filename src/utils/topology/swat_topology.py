@@ -5,20 +5,119 @@ with detailed component relationships as 1-cells
 
 import numpy as np
 import toponetx as tnx
+import json
+import os
 from src.utils.attack_utils import get_attack_indices, get_sensor_subsets, SWAT_SUB_MAP, is_actuator
 
 class SWATComplex:
-    def __init__(self):
-        """Initialize the SWAT combinatorial complex representation"""
+    def __init__(self, use_geco_relationships=False):
+        """Initialize the SWAT combinatorial complex representation
+        
+        Parameters
+        ----------
+        use_geco_relationships : bool, default=False
+            Whether to use GECO-learned relationships from SWaT.model
+        """
         self.complex = tnx.CombinatorialComplex()
         self.subsystem_map = SWAT_SUB_MAP
         self.attacks, self.attack_labels = get_attack_indices("SWAT")
         self.plc_idxs, self.plc_components = get_sensor_subsets("SWAT", by_plc=True)
         self.process_idxs, _ = get_sensor_subsets("SWAT", by_plc=False)
+        self.use_geco_relationships = use_geco_relationships
+        
+        # Store GECO relationships for later use in feature computation
+        self.geco_relationships = {}
+        if use_geco_relationships:
+            self.geco_relationships = self._load_geco_relationships()
         
         # Build the complex
         self._build_complex()
         
+    def _load_geco_relationships(self):
+        """Load GECO-learned relationships from SWaT.model file"""
+        print("Loading GECO relationships from SWaT.model...")
+        
+        # Path to the SWaT.model file
+        model_path = os.path.join(os.path.dirname(__file__), "SWaT.model")
+        
+        if not os.path.exists(model_path):
+            print(f"Warning: SWaT.model not found at {model_path}")
+            return {}
+            
+        try:
+            with open(model_path, 'r') as f:
+                geco_data = json.load(f)
+            
+            relationships = {}
+            ci_data = geco_data.get('CI', {})
+            
+            print(f"Found {len(ci_data)} components with GECO relationships")
+            
+            for component, details in ci_data.items():
+                if 'combination' in details and 'parameters' in details:
+                    combination = details['combination']
+                    parameters = details['parameters']
+                    equation = details.get('equation', 'Sum')
+                    error = details.get('error', 0.0)
+                    threshold = details.get('threshold', 0.0)
+                    
+                    # Store relationship information
+                    relationships[component] = {
+                        'combination': combination,
+                        'parameters': parameters,
+                        'equation': equation,
+                        'error': error,
+                        'threshold': threshold,
+                        'target': component  # The component being predicted
+                    }
+                    
+                    print(f"  {component}: {equation} with {len(combination)} inputs, error={error:.6f}")
+            
+            return relationships
+            
+        except Exception as e:
+            print(f"Error loading GECO relationships: {e}")
+            return {}
+    
+    def _get_geco_relationships(self):
+        """Convert GECO relationships to edge format"""
+        if not self.geco_relationships:
+            return []
+        
+        relationships = []
+        
+        for target_component, details in self.geco_relationships.items():
+            combination = details['combination']
+            parameters = details['parameters']
+            equation = details['equation']
+            error = details['error']
+            
+            # Create relationships between inputs and target
+            for i, input_component in enumerate(combination):
+                if input_component != target_component:  # Skip self-loops
+                    # Get the parameter strength for this input
+                    # Parameters[0] is usually the self-coefficient, parameters[1:] are input coefficients
+                    if i < len(parameters) - 1:  # -1 because parameters[0] is self-coefficient
+                        param_strength = abs(parameters[i + 1])  # +1 to skip self-coefficient
+                    else:
+                        param_strength = 1.0  # Default if parameter missing
+                    
+                    description = f"GECO {equation}: {input_component} → {target_component} (strength={param_strength:.4f}, error={error:.6f})"
+                    
+                    relationships.append((
+                        input_component, 
+                        target_component, 
+                        description,
+                        {
+                            'geco_strength': param_strength,
+                            'geco_equation': equation,
+                            'geco_error': error,
+                            'geco_threshold': details.get('threshold', 0.0)
+                        }
+                    ))
+        
+        return relationships
+    
     def _is_sensor(self, component):
         """Check if a component is a sensor based on its naming pattern"""
         return not is_actuator("SWAT", component)
@@ -63,8 +162,6 @@ class SWATComplex:
             ("P205", "AIT203", "NaOCl dosing affects ORP"),
             ("P206", "AIT203", "backup NaOCl dosing affects ORP"),
 
-
-            
             # Stage 3: Ultrafiltration
             ("MV301", "LIT301", "valve 301 to level sensor"),
             ("MV301", "FIT301", "valve 301 to flow sensor"),
@@ -135,12 +232,6 @@ class SWATComplex:
             ("PIT503", "FIT503", "reject pressure affects flow"),
             ("FIT504", "AIT503", "recirculation affects feed conductivity"),
 
-
-       
-            
-
-
-            
             # Stage 6: Backwash
             ("P602", "MV303", "pressure affects backwash pump"),
             ("P602", "MV301", "pump controls backwash flow"),
@@ -175,17 +266,30 @@ class SWATComplex:
         for component in unique_components:
             self.complex.add_cell([component], rank=0)
         
-        # ONLY add specific component relationships as rank 1 cells
-        relationships = self._get_specific_component_relationships()
-        print(f"Adding {len(relationships)} specific component relationships as rank 1 cells")
+        # Choose relationship source based on configuration
+        if self.use_geco_relationships:
+            print("Using GECO-learned relationships")
+            relationships = self._get_geco_relationships()
+        else:
+            print("Using manually defined relationships")
+            relationships = [(s, t, d) for s, t, d in self._get_specific_component_relationships()]
+        
+        print(f"Adding {len(relationships)} relationships as rank 1 cells")
         added_count = 0
         
-        for source, target, description in relationships:
+        for relationship in relationships:
+            if len(relationship) == 3:
+                source, target, description = relationship
+                geco_attrs = {}
+            else:
+                source, target, description, geco_attrs = relationship
+                
             try:
                 # Check if components exist
                 if source in unique_components and target in unique_components:
                     # Add both components as a 1-cell (relation)
-                    self.complex.add_cell([source, target], rank=1, name=f"{source}_{target}", description=description)
+                    cell_name = f"{source}_{target}"
+                    self.complex.add_cell([source, target], rank=1, name=cell_name, description=description, **geco_attrs)
                     print(f"  Added 1-cell: [{source}, {target}] ({description})")
                     added_count += 1
                 else:
@@ -216,23 +320,53 @@ class SWATComplex:
         
         print(f"  Successfully added {plc_added_count} PLC control groups")
         
-        # # Add subsystems as rank 3 cells
-        # print(f"Adding subsystems as rank 3 cells")
-        # subsystem_added_count = 0
-        
-        # for subsystem, components in self.subsystem_map.items():
-        #     # Filter out components that don't exist in our list
-        #     valid_components = [comp for comp in components if comp in unique_components]
-        #     if len(valid_components) >= 2:  # Need at least 2 components to form a cell
-        #         self.complex.add_cell(valid_components, rank=3, name=subsystem)
-        #         print(f"  Added rank 3 cell: {subsystem} with {len(valid_components)} components")
-        #         subsystem_added_count += 1
-        #     else:
-        #         print(f"  Warning: Not enough valid components for subsystem {subsystem}")
-        
-        # print(f"  Successfully added {subsystem_added_count} subsystems")
-        
         print(f"Complex built: {self.complex}")
+    
+    def get_geco_edge_features(self, boundary_nodes):
+        """
+        Get GECO-derived features for an edge between two boundary nodes.
+        
+        Parameters
+        ----------
+        boundary_nodes : list
+            List of two component names that form the edge
+            
+        Returns
+        -------
+        dict or None
+            Dictionary with GECO features if relationship exists, None otherwise
+        """
+        if not self.use_geco_relationships or not self.geco_relationships:
+            return None
+            
+        # Sort nodes for consistent lookup
+        node1, node2 = sorted(boundary_nodes)
+        
+        # Check if either node has a GECO relationship involving the other
+        for component in [node1, node2]:
+            if component in self.geco_relationships:
+                geco_info = self.geco_relationships[component]
+                
+                # Check if the other node is in the GECO combination
+                other_node = node2 if component == node1 else node1
+                
+                # Look for the other node in the combination
+                if other_node in geco_info['combination']:
+                    # Find the parameter index for this connection
+                    param_index = geco_info['combination'].index(other_node)
+                    
+                    # Get the parameter value (coefficient)
+                    if param_index < len(geco_info['parameters']):
+                        param_value = abs(geco_info['parameters'][param_index])  # Use absolute value as strength
+                        
+                        return {
+                            'geco_strength': float(param_value),
+                            'geco_equation': geco_info['equation'],
+                            'geco_component': component,  # Which component this relationship describes
+                            'geco_direction': 'forward' if component == node1 else 'reverse'  # Direction of relationship
+                        }
+        
+        return None
     
     def get_complex(self):
         """Return the combinatorial complex"""

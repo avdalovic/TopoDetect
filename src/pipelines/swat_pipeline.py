@@ -323,9 +323,15 @@ def run_experiment(config):
             validation_split_ratio=config['data']['validation_split_ratio']
         )
 
-    # Load SWAT topology
+    # Load SWAT topology with optional GECO features
     print("Loading SWAT topology...")
-    swat_complex = SWATComplex()
+    use_geco_relationships = config.get('topology', {}).get('use_geco_relationships', False)
+    swat_complex = SWATComplex(use_geco_relationships=use_geco_relationships)
+    
+    if use_geco_relationships:
+        print("Using GECO-learned relationships from SWaT.model")
+    else:
+        print("Using manually defined relationships")
 
     # Get component names
     component_names = [col for col in train_data.columns if col not in ['Timestamp', 'Normal/Attack']]
@@ -334,16 +340,24 @@ def run_experiment(config):
     # Remove dynamic feature filtering - use general method
     print("Using general method without dynamic feature filtering.")
 
-    # Create datasets
+    # Create datasets with optional GECO features
     print(f"Creating datasets (train, validation, test) in {'temporal' if temporal_mode else 'reconstruction'} mode...")
+    
+    # Check if GECO features should be used
+    use_geco_features = config.get('topology', {}).get('use_geco_features', False)
+    
     if temporal_mode:
         dataset_args = {
             'temporal_mode': True,
             'n_input': config['model']['n_input'],
-            'temporal_sample_rate': config['data']['temporal_sample_rate']
+            'temporal_sample_rate': config['data']['temporal_sample_rate'],
+            'use_geco_features': use_geco_features
         }
     else:
-        dataset_args = {'temporal_mode': False}
+        dataset_args = {
+            'temporal_mode': False,
+            'use_geco_features': use_geco_features
+        }
 
     train_dataset = SWaTDataset(train_data, swat_complex, **dataset_args)
     validation_dataset = SWaTDataset(validation_data, swat_complex, **dataset_args) if not validation_data.empty else None
@@ -377,6 +391,9 @@ def run_experiment(config):
         '2': train_dataset.feature_dim_2
     }
     print(f"Using feature dimensions: {original_feature_dims}")
+    
+    if use_geco_features:
+        print(f"Enhanced edge features enabled: 1-cell dimension = {original_feature_dims['1']}")
     
     model = AnomalyCCANN(
         config['model']['channels_per_layer'], 

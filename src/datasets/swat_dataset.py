@@ -9,7 +9,7 @@ from src.utils.attack_utils import is_actuator
 
 class SWaTDataset(Dataset):
     """Dataset class for SWAT anomaly detection."""
-    def __init__(self, data, swat_complex, feature_dim_0=3, n_input=10, temporal_mode=False, temporal_sample_rate=1):
+    def __init__(self, data, swat_complex, feature_dim_0=3, n_input=10, temporal_mode=False, temporal_sample_rate=1, use_geco_features=False):
         """
         Initialize the SWAT dataset for anomaly detection.
 
@@ -24,55 +24,58 @@ class SWaTDataset(Dataset):
         n_input : int, default=10
             Number of input timesteps for temporal mode
         temporal_mode : bool, default=False
-            Whether to use temporal sequences or single timesteps
+            Whether to use temporal mode
         temporal_sample_rate : int, default=1
-            Rate at which to subsample temporal data. 1 means no subsampling.
+            Sampling rate for temporal mode
+        use_geco_features : bool, default=False
+            Whether to use enhanced edge features with GECO information
         """
         self.data = data
-        self.complex = swat_complex.get_complex()
-        self.feature_dim_0 = feature_dim_0  # 0-cells: 3D
-        self.feature_dim_1 = feature_dim_0 * 2  # 1-cells: 6D (concatenation of two 0-cells)
-        self.feature_dim_2 = feature_dim_0 + 1  # 2-cells: 4D (avg of 0-cells + PLC zone size)
+        self.swat_complex = swat_complex  # Store the wrapper object
+        self.complex = swat_complex.get_complex()  # Get the actual complex
+        self.feature_dim_0 = feature_dim_0
         self.n_input = n_input
         self.temporal_mode = temporal_mode
-
-        # Extract features and labels
-        self.labels = data['Normal/Attack'].map(lambda x: 0 if (x == 'False' or x == 0 or x == 0.0) else 1).values
-
-        # Get sensor and actuator columns (excluding timestamp and label)
-        self.columns = [col for col in data.columns if col not in ['Timestamp', 'Normal/Attack']]
-
-        # Preprocess features
-        self.x_0 = self.preprocess_features()
-
-        # Get topology matrices (only need to compute once since topology is fixed)
-        self.a0, self.a1, self.coa2, self.b1, self.b2 = self.get_neighborhood_matrix()
-
-        # Compute initial features for 1-cells and 2-cells
+        self.temporal_sample_rate = temporal_sample_rate
+        self.use_geco_features = use_geco_features
+        
+        # Set feature dimensions based on GECO usage
+        if use_geco_features:
+            self.feature_dim_1 = feature_dim_0 * 2 + 2  # 6D concatenated + 2D GECO features = 8D
+            print(f"Using GECO-enhanced edge features: {self.feature_dim_1}D")
+        else:
+            self.feature_dim_1 = feature_dim_0 * 2  # 6D concatenated features
+            print(f"Using standard edge features: {self.feature_dim_1}D")
+        
+        self.feature_dim_2 = feature_dim_0  # 2-cells use same dimension as 0-cells
+        
+        # Process data and create features
+        self.preprocess_features()
+        self.x_0 = self.compute_initial_x0()
         self.x_1 = self.compute_initial_x1()
         self.x_2 = self.compute_initial_x2()
-
-        # Calculate effective length based on temporal mode
-        if self.temporal_mode and temporal_sample_rate > 1:
-            # Subsample data to reduce training cost
-            sampled_indices = list(range(0, len(self.data), temporal_sample_rate))
-            self.data = self.data.iloc[sampled_indices].reset_index(drop=True)
-            self.labels = self.labels[sampled_indices]
-            print(f"Applied temporal sampling every {temporal_sample_rate} timesteps: {len(self.data)} samples remaining")
-
-        if self.temporal_mode:
-            self.effective_length = len(self.data) - self.n_input
-            print(f"Using temporal mode with sequence length {self.n_input}, effective samples: {self.effective_length}")
+        self.labels = self.data['Normal/Attack'].values
+        
+        # Create adjacency matrices for the complex
+        self.create_adjacency_matrices()
+        
+        # Handle temporal mode
+        if temporal_mode:
+            self.create_temporal_samples()
         else:
             self.effective_length = len(self.data)
 
-        print(f"Initialized SWaTDataset with {self.effective_length} samples")
-        print(f"Feature dimensions - 0-cells: {self.x_0.shape} (dim={self.feature_dim_0}), 1-cells: {self.x_1.shape} (dim={self.feature_dim_1}), 2-cells: {self.x_2.shape} (dim={self.feature_dim_2})")
-        
-        # Debug: Print sample features
-        self.print_sample_features()
-
     def preprocess_features(self):
+        """
+        Extract and preprocess features from the data.
+        """
+        # Extract features and labels
+        self.labels = self.data['Normal/Attack'].map(lambda x: 0 if (x == 'False' or x == 0 or x == 0.0) else 1).values
+
+        # Get sensor and actuator columns (excluding timestamp and label)
+        self.columns = [col for col in self.data.columns if col not in ['Timestamp', 'Normal/Attack']]
+
+    def compute_initial_x0(self):
         """
         Preprocess raw features to create standardized 3D feature vectors.
         For sensors: [normalized_value, 0, 0]
@@ -125,50 +128,26 @@ class SWaTDataset(Dataset):
             features[:, i, 0] = (values - sensor_means[idx]) / sensor_stds[idx]
         
         print(f"Normalized sensor features, mean: {sensor_means.mean():.4f}, std: {sensor_stds.mean():.4f}")
-        print(f"Actuator encoding: state 0=[0,0,0], state 1=[0,1,0], state 2=[0,0,1]")
+        print(f"Computed 0-cell features shape: {features.shape}")
         
-        print(f"Preprocessed features shape: {features.shape}")
         return features
-
-    def get_neighborhood_matrix(self):
-        """
-        Compute the neighborhood matrices for the SWAT complex.
-
-        Returns
-        -------
-        tuple of torch.sparse.Tensor
-            Adjacency, coadjacency and incidence matrices
-        """
-        print("Computing neighborhood matrices...")
-
-        # Get adjacency matrices
-        a0 = torch.from_numpy(self.complex.adjacency_matrix(0, 1).todense()).to_sparse()
-        a1 = torch.from_numpy(self.complex.adjacency_matrix(1, 2).todense()).to_sparse()
-
-        # Get incidence matrices
-        b1 = torch.from_numpy(self.complex.incidence_matrix(0, 1).todense()).to_sparse()
-        b2 = torch.from_numpy(self.complex.incidence_matrix(1, 2).todense()).to_sparse()
-
-        # Compute coadjacency matrix for 2-cells
-        B = self.complex.incidence_matrix(0, 2)
-        A = B.T @ B
-        A.setdiag(0)
-        coa2 = torch.from_numpy(A.todense()).to_sparse()
-
-        print(f"Matrix dimensions - a0: {a0.shape}, a1: {a1.shape}, coa2: {coa2.shape}, b1: {b1.shape}, b2: {b2.shape}")
-        return a0, a1, coa2, b1, b2
 
     def compute_initial_x1(self):
         """
         Initialize 1-cell features based on connected 0-cells.
-        Concatenate features instead of averaging to preserve information.
+        Concatenate features and optionally add GECO features.
 
         Returns
         -------
         torch.Tensor
-            Tensor of shape [num_timestamps, num_1_cells, feature_dim_1] where feature_dim_1 = feature_dim_0 * 2
+            Tensor of shape [num_timestamps, num_1_cells, feature_dim_1] 
+            where feature_dim_1 = feature_dim_0 * 2 [+ 2 if using GECO features]
         """
-        print("Computing initial 1-cell features (concatenation method)...")
+        if self.use_geco_features:
+            print("Computing initial 1-cell features (concatenation + GECO method)...")
+        else:
+            print("Computing initial 1-cell features (concatenation method)...")
+            
         num_samples = len(self.data)
 
         # Get row and column dictionaries for 0-1 incidence matrix
@@ -176,53 +155,76 @@ class SWaTDataset(Dataset):
         
         # Use the column dictionary to get all 1-cells
         cells_1 = list(col_dict.keys())
-        num_1_cells = len(cells_1)
         
-        print(f"Found {num_1_cells} 1-cells")
+        # Create a mapping from component name to index in our data
+        component_to_idx = {comp: i for i, comp in enumerate(self.columns)}
+        
+        # Filter 1-cells to only include those where both boundary nodes exist in our data
+        valid_cells_1 = []
+        valid_cell_indices = []
+        
+        for cell_idx, cell in enumerate(cells_1):
+            boundary_nodes = list(cell)
+            if len(boundary_nodes) == 2:
+                # Check if both boundary nodes exist in our dataset
+                if all(node in component_to_idx for node in boundary_nodes):
+                    valid_cells_1.append(cell)
+                    valid_cell_indices.append(cell_idx)
+        
+        num_1_cells = len(valid_cells_1)
+        print(f"Found {len(cells_1)} total 1-cells, {num_1_cells} valid for current dataset")
 
-        # Create tensor for 1-cell features (now 6D due to concatenation)
+        # Create tensor for 1-cell features
         x_1 = torch.zeros((num_samples, num_1_cells, self.feature_dim_1))
 
-        # For each 1-cell (edge), concatenate the features of its boundary 0-cells
-        for cell_idx, cell in enumerate(cells_1):
-            # Each 1-cell is a frozenset containing two 0-cells
+        # For each valid 1-cell (edge), concatenate the features of its boundary 0-cells
+        for new_cell_idx, cell in enumerate(valid_cells_1):
             boundary_nodes = list(cell)
-            if len(boundary_nodes) != 2:
-                print(f"Warning: 1-cell {cell} has {len(boundary_nodes)} boundary nodes, expected 2")
-                continue
 
-            # Get indices of boundary nodes in the row dictionary
-            try:
-                node_indices = [row_dict[frozenset({node})] for node in boundary_nodes]
+            # Get indices of boundary nodes in our dataset
+            node_indices = [component_to_idx[node] for node in boundary_nodes]
 
-                # Concatenate the features of the boundary nodes
-                for sample_idx in range(num_samples):
-                    # Concatenate features of connected 0-cells
-                    node1_feat = self.x_0[sample_idx, node_indices[0]]  # First 3 dimensions
-                    node2_feat = self.x_0[sample_idx, node_indices[1]]  # Next 3 dimensions
-                    edge_feat = torch.cat([node1_feat, node2_feat], dim=0)  # 6D concatenated feature
-                    x_1[sample_idx, cell_idx] = edge_feat
+            # Get GECO features if enabled
+            geco_features = None
+            if self.use_geco_features:
+                geco_features = self.swat_complex.get_geco_edge_features(boundary_nodes)
 
-            except KeyError as e:
-                print(f"Warning: Couldn't find node in row_dict: {e}")
+            # Concatenate the features of the boundary nodes
+            for sample_idx in range(num_samples):
+                # Concatenate features of connected 0-cells (first 6 dimensions)
+                node1_feat = self.x_0[sample_idx, node_indices[0]]  # First 3 dimensions
+                node2_feat = self.x_0[sample_idx, node_indices[1]]  # Next 3 dimensions
+                edge_feat = torch.cat([node1_feat, node2_feat], dim=0)  # 6D concatenated feature
+                
+                # Add GECO features if enabled
+                if self.use_geco_features:
+                    if geco_features is not None:
+                        # Add simplified GECO features: [strength, equation_type]
+                        equation_type = 1.0 if geco_features['geco_equation'] == 'Product' else 0.0
+                        geco_feat = torch.tensor([
+                            geco_features['geco_strength'],
+                            equation_type
+                        ], dtype=torch.float32)
+                    else:
+                        # Default GECO features for non-GECO edges
+                        geco_feat = torch.tensor([0.0, 0.0], dtype=torch.float32)
+                    
+                    # Concatenate original features with GECO features
+                    edge_feat = torch.cat([edge_feat, geco_feat], dim=0)  # 8D total feature
+                
+                x_1[sample_idx, new_cell_idx] = edge_feat
 
         print(f"Computed 1-cell features shape: {x_1.shape}")
         return x_1
 
     def compute_initial_x2(self):
         """
-        Initialize 2-cell features based on grouped 0-cells.
-        Add PLC zone size information as 4th dimension.
-
-        Returns
-        -------
-        torch.Tensor
-            Tensor of shape [num_timestamps, num_2_cells, feature_dim_2] where feature_dim_2 = feature_dim_0 + 1
+        Initialize 2-cell features based on average of connected 0-cells.
         """
-        print("Computing initial 2-cell features (with PLC zone size)...")
+        print("Computing initial 2-cell features...")
         num_samples = len(self.data)
-
-        # Get row dictionaries for 0-1 and 1-2 incidence matrices
+        
+        # Get 2-cells (PLC zones) using the correct TopoNetX method
         row_dict_01, _, _ = self.complex.incidence_matrix(0, 1, index=True)
         _, col_dict_12, _ = self.complex.incidence_matrix(1, 2, index=True)
         
@@ -230,15 +232,19 @@ class SWaTDataset(Dataset):
         cells_2 = list(col_dict_12.keys())
         num_2_cells = len(cells_2)
         
-        print(f"Found {num_2_cells} 2-cells")
-
-        # Create tensor for 2-cell features (now 4D: 3D averaged + 1D zone size)
+        if num_2_cells == 0:
+            print("No 2-cells found, creating dummy 2-cell features")
+            return torch.zeros((num_samples, 1, self.feature_dim_2))
+        
+        print(f"Found {num_2_cells} 2-cells (PLC zones)")
+        
+        # Create tensor for 2-cell features
         x_2 = torch.zeros((num_samples, num_2_cells, self.feature_dim_2))
-
-        # Total number of 0-cells for relative size calculation
-        total_0_cells = len(self.columns)
-
-        # For each 2-cell, collect and average the features of its 0-cells + add zone size
+        
+        # Get component to index mapping
+        component_to_idx = {comp: i for i, comp in enumerate(self.columns)}
+        
+        # For each 2-cell, compute average features of its components
         for cell_idx, cell in enumerate(cells_2):
             # Each 2-cell contains multiple 0-cells
             # Extract 0-cells directly from the frozenset (they're already listed there)
@@ -253,99 +259,104 @@ class SWaTDataset(Dataset):
                     if node_frozenset in row_dict_01:
                         node_indices.append(row_dict_01[node_frozenset])
                 
-                # If we have valid nodes, average their features and add zone size
+                # If we have valid nodes, average their features
                 if node_indices:
-                    # Calculate relative zone size (number of 0-cells in this 2-cell / total 0-cells)
-                    zone_size = len(node_indices) / total_0_cells
-                    
                     for sample_idx in range(num_samples):
-                        # Average features of all 0-cells in the group (first 3 dimensions)
-                        face_feat = torch.zeros(self.feature_dim_0)
+                        # Average features of all 0-cells in the group
+                        face_feat = torch.zeros(self.feature_dim_2)
                         for node_idx in node_indices:
                             face_feat += self.x_0[sample_idx, node_idx]
                         face_feat /= len(node_indices)
-                        
-                        # Combine averaged features with zone size
-                        full_feat = torch.cat([face_feat, torch.tensor([zone_size])], dim=0)
-                        x_2[sample_idx, cell_idx] = full_feat
+                        x_2[sample_idx, cell_idx] = face_feat
                 else:
                     print(f"Warning: No valid 0-cells found for 2-cell {cell}")
-                    # Set zone size to 0 if no valid nodes
-                    x_2[:, cell_idx, -1] = 0.0
 
             except Exception as e:
                 print(f"Warning: Error computing 2-cell features for cell {cell}: {e}")
                 print(f"Cell contents: {cell}")
-
+        
         print(f"Computed 2-cell features shape: {x_2.shape}")
         return x_2
 
-    def print_sample_features(self):
-        """Print sample features for debugging."""
-        if len(self.data) == 0:
+    def create_adjacency_matrices(self):
+        """Create adjacency matrices for the complex."""
+        print("Creating adjacency matrices...")
+        
+        # Get topology matrices
+        self.a0, self.a1, self.coa2, self.b1, self.b2 = self.get_neighborhood_matrix()
+        
+        print("Adjacency matrices created successfully")
+
+    def get_neighborhood_matrix(self):
+        """Get neighborhood matrices for the combinatorial complex."""
+        # Get adjacency matrices
+        a0 = self.complex.adjacency_matrix(rank=0, via_rank=1, index=False)
+        a1 = self.complex.adjacency_matrix(rank=1, via_rank=2, index=False)
+        coa2 = self.complex.coadjacency_matrix(rank=2, via_rank=0, index=False)
+        
+        # Get incidence matrices
+        b1 = self.complex.incidence_matrix(rank=0, to_rank=1, index=False)
+        b2 = self.complex.incidence_matrix(rank=1, to_rank=2, index=False)
+        
+        # Convert to sparse tensors (following pattern from other datasets)
+        a0_tensor = torch.from_numpy(a0.toarray()).to_sparse()
+        a1_tensor = torch.from_numpy(a1.toarray()).to_sparse()
+        coa2_tensor = torch.from_numpy(coa2.toarray()).to_sparse()
+        b1_tensor = torch.from_numpy(b1.toarray()).to_sparse()
+        b2_tensor = torch.from_numpy(b2.toarray()).to_sparse()
+        
+        return a0_tensor, a1_tensor, coa2_tensor, b1_tensor, b2_tensor
+
+    def create_temporal_samples(self):
+        """Create temporal samples for temporal mode."""
+        if not self.temporal_mode:
             return
             
-        print("\n=== DEBUG: Sample Features ===")
+        print(f"Creating temporal samples with sequence length {self.n_input}")
         
-        # Print one 0-cell feature
-        sample_0_cell = self.x_0[0, 0]  # First sample, first 0-cell
-        print(f"Sample 0-cell feature (component '{self.columns[0]}'): {sample_0_cell.numpy()}")
+        # Apply temporal sampling if specified
+        if self.temporal_sample_rate > 1:
+            sampled_indices = list(range(0, len(self.data), self.temporal_sample_rate))
+            self.data = self.data.iloc[sampled_indices].reset_index(drop=True)
+            self.labels = self.labels[sampled_indices]
+            print(f"Applied temporal sampling every {self.temporal_sample_rate} timesteps: {len(self.data)} samples remaining")
         
-        # Print one 1-cell feature
-        if self.x_1.shape[1] > 0:
-            sample_1_cell = self.x_1[0, 0]  # First sample, first 1-cell
-            print(f"Sample 1-cell feature: {sample_1_cell.numpy()}")
-        
-        # Print one 2-cell feature
-        if self.x_2.shape[1] > 0:
-            sample_2_cell = self.x_2[0, 0]  # First sample, first 2-cell
-            print(f"Sample 2-cell feature: {sample_2_cell.numpy()}")
-            print(f"  - First 3 dims (averaged 0-cell features): {sample_2_cell[:3].numpy()}")
-            print(f"  - 4th dim (PLC zone size): {sample_2_cell[3].item():.4f}")
-        
-        print("=== END DEBUG ===\n")
+        # Calculate effective length for temporal mode
+        self.effective_length = len(self.data) - self.n_input
+        print(f"Effective samples in temporal mode: {self.effective_length}")
+
+    def print_sample_features(self):
+        """Print sample features for debugging."""
+        print("\n=== Sample Features ===")
+        print(f"Sample 0-cell features (first 3 components): {self.x_0[0, :3]}")
+        print(f"Sample 1-cell features (first 3 edges): {self.x_1[0, :3]}")
+        print(f"Sample 2-cell features (first 3 faces): {self.x_2[0, :3]}")
+        print(f"Sample label: {self.labels[0]}")
 
     def __len__(self):
-        """Return the number of samples."""
         return self.effective_length
 
     def __getitem__(self, idx):
-        """Return a sample from the dataset."""
         if self.temporal_mode:
-            # Return sequence of timesteps and next timestep as target
-            if idx >= self.effective_length:
-                idx = self.effective_length - 1  # Handle boundary case
-                
-            # Get sequence of inputs (t-n_input to t-1)
-            seq_x0 = self.x_0[idx:idx+self.n_input]  # [n_input, n_nodes, feat_dim]
-            seq_x1 = self.x_1[idx:idx+self.n_input]  # [n_input, n_edges, feat_dim]
-            seq_x2 = self.x_2[idx:idx+self.n_input]  # [n_input, n_2cells, feat_dim]
-            
-            # Target is the next timestep (t)
-            target_x0 = self.x_0[idx+self.n_input]  # [n_nodes, feat_dim]
-            target_x1 = self.x_1[idx+self.n_input]  # [n_edges, feat_dim]
-            target_x2 = self.x_2[idx+self.n_input]  # [n_2cells, feat_dim]
-            
-            # Label of the target timestep
-            label = self.labels[idx+self.n_input]
+            # Return temporal sequence
+            seq_x0 = self.x_0[idx:idx + self.n_input]
+            seq_x1 = self.x_1[idx:idx + self.n_input]
+            seq_x2 = self.x_2[idx:idx + self.n_input]
             
             return {
-                'seq_x0': seq_x0,
-                'seq_x1': seq_x1,
-                'seq_x2': seq_x2,
-                'target_x0': target_x0,
-                'target_x1': target_x1,
-                'target_x2': target_x2,
+                'x_0': seq_x0,
+                'x_1': seq_x1,
+                'x_2': seq_x2,
                 'a0': self.a0,
                 'a1': self.a1,
                 'coa2': self.coa2,
                 'b1': self.b1,
                 'b2': self.b2,
-                'label': label
+                'label': self.labels[idx + self.n_input - 1]
             }
         else:
-            # Original code for single timestep
-            return (   
+            # Return single timestep
+            return (
                 self.x_0[idx],
                 self.x_1[idx],
                 self.x_2[idx],
