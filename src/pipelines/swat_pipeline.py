@@ -49,6 +49,15 @@ def load_swat_data(train_path, test_path, sample_rate=1.0, save_test_path=None, 
     # Load data
     initial_train_data = pd.read_csv(train_path)
     test_data = pd.read_csv(test_path)
+    
+    # Remove first 21600 points (6 hours) from training data for SWAT stabilization
+    stabilization_point = 21600
+    if len(initial_train_data) > stabilization_point:
+        print(f"Removing first {stabilization_point} data points (6 hours) for SWAT stabilization")
+        initial_train_data = initial_train_data.iloc[stabilization_point:].reset_index(drop=True)
+        print(f"Training data after stabilization removal: {len(initial_train_data)} samples")
+    else:
+        print(f"Warning: Training data has only {len(initial_train_data)} samples, cannot remove {stabilization_point} points")
 
     # Apply sampling to training data (always use linspace approach)
     if sample_rate < 1.0:
@@ -346,17 +355,27 @@ def run_experiment(config):
     # Check if GECO features should be used
     use_geco_features = config.get('topology', {}).get('use_geco_features', False)
     
+    # Get new feature engineering parameters
+    normalization_method = config.get('data', {}).get('normalization_method', 'standard')
+    use_enhanced_2cell_features = config.get('data', {}).get('use_enhanced_2cell_features', False)
+    
+    print(f"Feature engineering config: normalization={normalization_method}, enhanced_2cell={use_enhanced_2cell_features}")
+    
     if temporal_mode:
         dataset_args = {
             'temporal_mode': True,
             'n_input': config['model']['n_input'],
             'temporal_sample_rate': config['data']['temporal_sample_rate'],
-            'use_geco_features': use_geco_features
+            'use_geco_features': use_geco_features,
+            'normalization_method': normalization_method,
+            'use_enhanced_2cell_features': use_enhanced_2cell_features
         }
     else:
         dataset_args = {
             'temporal_mode': False,
-            'use_geco_features': use_geco_features
+            'use_geco_features': use_geco_features,
+            'normalization_method': normalization_method,
+            'use_enhanced_2cell_features': use_enhanced_2cell_features
         }
 
     train_dataset = SWaTDataset(train_data, swat_complex, **dataset_args)
@@ -395,8 +414,19 @@ def run_experiment(config):
     if use_geco_features:
         print(f"Enhanced edge features enabled: 1-cell dimension = {original_feature_dims['1']}")
     
+    # Dynamically update model input channels based on dataset feature dimensions
+    # This ensures the model architecture from the config is respected while using correct input dimensions
+    channels_per_layer = config['model']['channels_per_layer']
+    in_channels = [
+        train_dataset.feature_dim_0,
+        train_dataset.feature_dim_1,
+        train_dataset.feature_dim_2
+    ]
+    channels_per_layer[0][0] = in_channels
+    print(f"Dynamically updated model input channels to: {in_channels}")
+
     model = AnomalyCCANN(
-        config['model']['channels_per_layer'], 
+        channels_per_layer, 
         original_feature_dims=original_feature_dims,
         temporal_mode=temporal_mode,
         n_input=config['model'].get('n_input', 10) # Get n_input safely
@@ -446,6 +476,10 @@ def run_experiment(config):
         threshold_percentile=config.get('anomaly_detection', {}).get('threshold_percentile', 99.0),
         sd_multiplier=config.get('anomaly_detection', {}).get('sd_multiplier', 2.5),
         use_component_thresholds=config.get('anomaly_detection', {}).get('use_component_thresholds', False),
+        use_two_threshold_alarm=config.get('anomaly_detection', {}).get('use_two_threshold_alarm', False),
+        plc_low_percentile=config.get('anomaly_detection', {}).get('plc_low_percentile', 98.0),
+        plc_high_percentile=config.get('anomaly_detection', {}).get('plc_high_percentile', 99.9),
+
         # Pass the corrected evaluation config block
         **eval_config
     )

@@ -34,6 +34,9 @@ class AnomalyTrainer:
                  sd_multiplier=2.5, 
                  use_component_thresholds=False,
                  temporal_consistency=1,
+                 use_two_threshold_alarm=False,
+                 plc_low_percentile=98.0,
+                 plc_high_percentile=99.9,
                  weight_decay=1e-5,
                  grad_clip_value=1.0,
                  # CUSUM specific parameters
@@ -68,6 +71,9 @@ class AnomalyTrainer:
         self.sd_multiplier = sd_multiplier 
         self.use_component_thresholds = use_component_thresholds
         self.temporal_consistency = temporal_consistency
+        self.use_two_threshold_alarm = use_two_threshold_alarm
+        self.plc_low_percentile = plc_low_percentile
+        self.plc_high_percentile = plc_high_percentile
         
         # CUSUM parameters
         self.evaluation_method = evaluation_method
@@ -158,6 +164,8 @@ class AnomalyTrainer:
         """Reset the temporal consistency buffer (call between test runs)."""
         self.temporal_buffer = []
         
+
+
     def to_device(self, x):
         """
         Move data to device, handling both dictionary and list inputs.
@@ -170,7 +178,7 @@ class AnomalyTrainer:
 
     def train_epoch(self):
         """
-        Train the model for one epoch. This method remains largely unchanged.
+        Train the model for one epoch.
         """
         self.model.train()
         total_loss = 0.0
@@ -181,17 +189,19 @@ class AnomalyTrainer:
 
         for i, sample in enumerate(self.train_dataloader):
             self.opt.zero_grad()
+            
             if self.model.temporal_mode:
-                # This logic seems highly specific and can remain
+                # Temporal mode - only reconstruction for now
                 sample = self.to_device(sample)
                 x0_pred, x2_mean_pred = self.model(sample)
                 target_x0 = sample['target_x0']
                 loss_0 = self.crit(x0_pred, target_x0).mean()
-                # Simplified loss for clarity, original logic was complex
                 loss = loss_0
                 total_loss += loss.item()
             else: # Reconstruction mode
                 x_0, x_1, x_2, a0, a1, coa2, b1, b2, _ = self.to_device(sample)
+                
+                # Standard reconstruction training
                 x_0_recon, x_1_recon, x_2_recon = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2)
                 
                 loss_0 = self.crit(x_0_recon, x_0).mean()
@@ -214,7 +224,6 @@ class AnomalyTrainer:
         """
         Calibrates the anomaly detection method using the validation set.
         Supports both 'threshold' and 'cusum' methods.
-        Now evaluates on all 3 levels and uses L2 loss consistently.
         """
         print(f"\nCalibrating using '{self.evaluation_method}' method on validation data...")
         self.model.eval()
@@ -232,6 +241,8 @@ class AnomalyTrainer:
                     all_residuals_0.append(residuals_0)
                 else:
                     x_0, x_1, x_2, _, _, _, _, _, _ = self.to_device(sample)
+                    
+                    # Standard reconstruction
                     x_0_recon, x_1_recon, x_2_recon = self.model(*self.to_device(sample)[:-1])
                     
                     # Use L2 loss consistently (MSE without reduction) for all levels
@@ -258,19 +269,28 @@ class AnomalyTrainer:
                 all_residuals_1 = torch.cat(all_residuals_1, dim=0)
                 all_residuals_2 = torch.cat(all_residuals_2, dim=0)
                 
-                # Calculate 99th percentile threshold for each level
+                # Calculate percentile thresholds for each level
                 error_per_sample_0 = torch.mean(all_residuals_0.cpu(), dim=(1, 2))
                 error_per_sample_1 = torch.mean(all_residuals_1.cpu(), dim=(1, 2))
                 error_per_sample_2 = torch.mean(all_residuals_2.cpu(), dim=(1, 2))
                 
                 self.anomaly_threshold_0 = np.percentile(error_per_sample_0.numpy(), self.threshold_percentile)
                 self.anomaly_threshold_1 = np.percentile(error_per_sample_1.numpy(), self.threshold_percentile)
-                self.anomaly_threshold_2 = np.percentile(error_per_sample_2.numpy(), self.threshold_percentile)
                 
-                print(f"Calibrated 3-level thresholds (99th percentile):")
-                print(f"  0-cells: {self.anomaly_threshold_0:.4f}")
-                print(f"  1-cells: {self.anomaly_threshold_1:.4f}")
-                print(f"  2-cells: {self.anomaly_threshold_2:.4f}")
+                if self.use_two_threshold_alarm:
+                    self.anomaly_threshold_2_low = np.percentile(error_per_sample_2.numpy(), self.plc_low_percentile)
+                    self.anomaly_threshold_2_high = np.percentile(error_per_sample_2.numpy(), self.plc_high_percentile)
+                    print(f"Calibrated 3-level thresholds (two-threshold for PLCs):")
+                    print(f"  0-cells ({self.threshold_percentile}%): {self.anomaly_threshold_0:.4f}")
+                    print(f"  1-cells ({self.threshold_percentile}%): {self.anomaly_threshold_1:.4f}")
+                    print(f"  2-cells Low ({self.plc_low_percentile}%): {self.anomaly_threshold_2_low:.4f}")
+                    print(f"  2-cells High ({self.plc_high_percentile}%): {self.anomaly_threshold_2_high:.4f}")
+                else:
+                    self.anomaly_threshold_2 = np.percentile(error_per_sample_2.numpy(), self.threshold_percentile)
+                    print(f"Calibrated 3-level thresholds ({self.threshold_percentile}th percentile):")
+                    print(f"  0-cells: {self.anomaly_threshold_0:.4f}")
+                    print(f"  1-cells: {self.anomaly_threshold_1:.4f}")
+                    print(f"  2-cells: {self.anomaly_threshold_2:.4f}")
             else:
                 # For temporal mode, only use 0-cells
                 error_per_sample_0 = torch.mean(all_residuals_0.cpu(), dim=(1, 2))
@@ -385,6 +405,8 @@ class AnomalyTrainer:
                     
                 else: # Reconstruction - evaluate on all 3 levels
                     x_0, x_1, x_2, _, _, _, _, _, _ = self.to_device(sample)
+                    
+                    # Standard reconstruction
                     x_0_recon, x_1_recon, x_2_recon = self.model(*self.to_device(sample)[:-1])
                     
                     # Use L2 loss consistently for all levels
@@ -429,20 +451,22 @@ class AnomalyTrainer:
                             error_1 = torch.mean(residuals_1[i])
                             error_2 = torch.mean(residuals_2[i])
                             
-                            # Individual level predictions (without temporal consistency for now)
                             is_anomalous_0 = (error_0 > self.anomaly_threshold_0).item()
                             is_anomalous_1 = (error_1 > self.anomaly_threshold_1).item()
-                            is_anomalous_2 = (error_2 > self.anomaly_threshold_2).item()
                             
+                            if self.use_two_threshold_alarm:
+                                is_high_plc_alarm = (error_2 > self.anomaly_threshold_2_high).item()
+                                is_low_plc_alarm = (error_2 > self.anomaly_threshold_2_low).item()
+                                is_anomalous_2 = is_high_plc_alarm or (is_low_plc_alarm and (is_anomalous_0 or is_anomalous_1))
+                            else:
+                                is_anomalous_2 = (error_2 > self.anomaly_threshold_2).item()
+
                             batch_level_preds['level_0'].append(is_anomalous_0)
                             batch_level_preds['level_1'].append(is_anomalous_1)
                             batch_level_preds['level_2'].append(is_anomalous_2)
                             
-                            # Anomaly if ANY level exceeds its threshold
                             raw_anomaly = is_anomalous_0 or is_anomalous_1 or is_anomalous_2
-                            # Store raw prediction
                             batch_preds_raw.append(raw_anomaly)
-                            # Apply temporal consistency to overall prediction
                             is_anomalous = self.apply_temporal_consistency(raw_anomaly)
                             batch_preds.append(is_anomalous)
                             
@@ -1048,10 +1072,15 @@ class AnomalyTrainer:
         os.makedirs(checkpoint_dir, exist_ok=True)
         best_f1 = -1.0
         epochs_no_improve = 0
+        
+
 
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch+1}/{num_epochs}")
             train_loss = self.train_epoch()
+            
+            # Use appropriate scheduler
+            # Update learning rate scheduler
             self.scheduler.step(train_loss)
 
             # Log training loss to wandb
@@ -1099,6 +1128,9 @@ class AnomalyTrainer:
             self.model.load_state_dict(torch.load(best_model_path))
             print("Loaded best model for final evaluation.")
         
+        # Save residuals for post-processing with different thresholds
+        residuals_path = self.save_residuals_for_post_processing(checkpoint_dir)
+        
         final_results = self.evaluate(self.test_dataloader, "Final Test")
         
         # Create detection timeline visualization
@@ -1108,3 +1140,127 @@ class AnomalyTrainer:
         self.analyze_individual_attacks()
         
         return final_results 
+
+    def save_residuals_for_post_processing(self, checkpoint_dir):
+        """
+        Save model residuals and test data for post-processing with different thresholds.
+        This allows evaluation with multiple thresholds without re-training.
+        """
+        print("\n--- Saving Residuals for Post-Processing ---")
+        
+        # Load best model
+        best_model_path = os.path.join(checkpoint_dir, "best_model.pt")
+        if os.path.exists(best_model_path):
+            self.model.load_state_dict(torch.load(best_model_path))
+            print("Loaded best model for residual calculation")
+        else:
+            print("Warning: Best model not found, using current model")
+        
+        self.model.eval()
+        
+        # Collect all residuals and ground truth
+        all_residuals_0 = []
+        all_residuals_1 = []
+        all_residuals_2 = []
+        all_ground_truth = []
+        all_timestamps = []
+        
+        print("Computing residuals on test data...")
+        with torch.no_grad():
+            for batch_idx, sample in enumerate(self.test_dataloader):
+                y_true = sample[-1].numpy()
+                all_ground_truth.extend(y_true)
+                
+                # Create timestamps for this batch
+                batch_timestamps = list(range(batch_idx * self.test_dataloader.batch_size, 
+                                            batch_idx * self.test_dataloader.batch_size + len(y_true)))
+                all_timestamps.extend(batch_timestamps)
+                
+                if self.model.temporal_mode:
+                    sample_device = self.to_device(sample)
+                    x0_pred, _ = self.model(sample_device)
+                    residuals_0 = self.crit(x0_pred, sample_device['target_x0'])
+                    all_residuals_0.append(residuals_0.cpu())
+                else:
+                    x_0, x_1, x_2, _, _, _, _, _, _ = self.to_device(sample)
+                    x_0_recon, x_1_recon, x_2_recon = self.model(*self.to_device(sample)[:-1])
+                    
+                    residuals_0 = self.crit(x_0_recon, x_0)
+                    residuals_1 = self.crit(x_1_recon, x_1)
+                    residuals_2 = self.crit(x_2_recon, x_2)
+                    
+                    all_residuals_0.append(residuals_0.cpu())
+                    all_residuals_1.append(residuals_1.cpu())
+                    all_residuals_2.append(residuals_2.cpu())
+                
+                total_batches = len(self.test_dataloader)
+                print_interval = max(1, total_batches // 5)  # Print only 5 times total
+                if (batch_idx + 1) % print_interval == 0:
+                    print(f"  Processed {batch_idx + 1}/{total_batches} batches ({(batch_idx + 1)/total_batches*100:.1f}%)")
+        
+        # Concatenate all residuals
+        all_residuals_0 = torch.cat(all_residuals_0, dim=0)
+        if not self.model.temporal_mode:
+            all_residuals_1 = torch.cat(all_residuals_1, dim=0)
+            all_residuals_2 = torch.cat(all_residuals_2, dim=0)
+        
+        # Convert to numpy arrays
+        all_ground_truth = np.array(all_ground_truth)
+        all_timestamps = np.array(all_timestamps)
+        
+        # Calculate per-sample errors (mean across features)
+        error_per_sample_0 = torch.mean(all_residuals_0, dim=(1, 2)).numpy()
+        if not self.model.temporal_mode:
+            error_per_sample_1 = torch.mean(all_residuals_1, dim=(1, 2)).numpy()
+            error_per_sample_2 = torch.mean(all_residuals_2, dim=(1, 2)).numpy()
+        else:
+            error_per_sample_1 = error_per_sample_0  # Use same for temporal mode
+            error_per_sample_2 = error_per_sample_0  # Use same for temporal mode
+        
+        # Save residuals and metadata
+        residuals_data = {
+            'residuals_0': all_residuals_0.numpy(),  # Full residual tensor
+            'residuals_1': all_residuals_1.numpy() if not self.model.temporal_mode else all_residuals_0.numpy(),
+            'residuals_2': all_residuals_2.numpy() if not self.model.temporal_mode else all_residuals_0.numpy(),
+            'error_per_sample_0': error_per_sample_0,
+            'error_per_sample_1': error_per_sample_1,
+            'error_per_sample_2': error_per_sample_2,
+            'ground_truth': all_ground_truth,
+            'timestamps': all_timestamps,
+            'model_config': {
+                'temporal_mode': self.model.temporal_mode,
+                'feature_dims': {
+                    '0': all_residuals_0.shape[2],
+                    '1': all_residuals_1.shape[2] if not self.model.temporal_mode else all_residuals_0.shape[2],
+                    '2': all_residuals_2.shape[2] if not self.model.temporal_mode else all_residuals_0.shape[2]
+                }
+            },
+            'dataset_info': {
+                'sample_rate': self.sample_rate,
+                'dataset_name': self.dataset_name,
+                'total_samples': len(all_ground_truth),
+                'normal_samples': np.sum(all_ground_truth == 0),
+                'attack_samples': np.sum(all_ground_truth == 1)
+            }
+        }
+        
+        # Save to file
+        residuals_path = os.path.join(checkpoint_dir, "test_residuals.pkl")
+        with open(residuals_path, 'wb') as f:
+            pickle.dump(residuals_data, f)
+        
+        print(f"Saved residuals to {residuals_path}")
+        print(f"Dataset info: {residuals_data['dataset_info']}")
+        
+        # Log to wandb as artifact
+        if wandb.run:
+            artifact = wandb.Artifact(
+                name=f"test_residuals_{wandb.run.name}",
+                type="residuals",
+                description="Test residuals for post-processing with different thresholds"
+            )
+            artifact.add_file(residuals_path)
+            wandb.log_artifact(artifact)
+            print("Logged residuals as wandb artifact")
+        
+        return residuals_path 

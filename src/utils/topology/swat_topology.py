@@ -290,7 +290,10 @@ class SWATComplex:
                     # Add both components as a 1-cell (relation)
                     cell_name = f"{source}_{target}"
                     self.complex.add_cell([source, target], rank=1, name=cell_name, description=description, **geco_attrs)
-                    print(f"  Added 1-cell: [{source}, {target}] ({description})")
+                    if added_count < 10:  # Only print first 10 for brevity
+                        print(f"  Added 1-cell: [{source}, {target}] ({description})")
+                    elif added_count == 10:
+                        print(f"  ... (suppressing further 1-cell additions)")
                     added_count += 1
                 else:
                     print(f"  Warning: Could not add 1-cell [{source}, {target}] (component not found)")
@@ -372,7 +375,11 @@ class SWATComplex:
         """Return the combinatorial complex"""
         return self.complex
     
-    
+    def _get_node_index_map(self):
+        """Helper to create a mapping from component name to its index in the complex."""
+        row_dict_01, _, _ = self.complex.incidence_matrix(0, 1, index=True)
+        return {list(k)[0]: v for k, v in row_dict_01.items()}
+
 
 # Example usage
 def main():
