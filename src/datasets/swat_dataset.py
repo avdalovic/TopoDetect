@@ -10,7 +10,7 @@ from src.utils.attack_utils import is_actuator
 class SWaTDataset(Dataset):
     """Dataset class for SWAT anomaly detection."""
     def __init__(self, data, swat_complex, feature_dim_0=3, n_input=10, temporal_mode=False, temporal_sample_rate=1, use_geco_features=False, 
-                 normalization_method="standard", use_enhanced_2cell_features=False):
+                 normalization_method="standard", use_enhanced_2cell_features=False, seed=None):
         """
         Initialize the SWAT dataset for anomaly detection.
 
@@ -34,6 +34,8 @@ class SWaTDataset(Dataset):
             Normalization method: "standard" (current), "z_normalization", "mixed_normalization"
         use_enhanced_2cell_features : bool, default=False
             Whether to use enhanced 2-cell features (4D: mean_sensors, sd_sensors, median_actuators, iqr_actuators)
+        seed : int, optional
+            Random seed for reproducibility
         """
         self.data = data
         self.swat_complex = swat_complex  # Store the wrapper object
@@ -45,39 +47,48 @@ class SWaTDataset(Dataset):
         self.use_geco_features = use_geco_features
         self.normalization_method = normalization_method
         self.use_enhanced_2cell_features = use_enhanced_2cell_features
+        self.seed = seed
+        
+        # Set seed if provided
+        if seed is not None:
+            np.random.seed(seed)
+            torch.manual_seed(seed)
         
         print(f"Using normalization method: {normalization_method}")
         print(f"Using enhanced 2-cell features: {use_enhanced_2cell_features}")
+        if seed is not None:
+            print(f"Using seed: {seed}")
         
         # Set feature dimensions based on configuration
+        # Determine actual 0-cell feature dimension based on normalization method
         if normalization_method == "standard":
-            # Original implementation
-            if use_geco_features:
-                self.feature_dim_1 = feature_dim_0 * 2 + 2  # 6D concatenated + 2D GECO features = 8D
-                print(f"Using GECO-enhanced edge features: {self.feature_dim_1}D")
-            else:
-                self.feature_dim_1 = feature_dim_0 * 2  # 6D concatenated features
-                print(f"Using standard edge features: {self.feature_dim_1}D")
-            if use_enhanced_2cell_features:
-                self.feature_dim_2 = 8  # 8D: mean, sd, min, max for sensors and actuators
-                print(f"Using enhanced 2-cell features: {self.feature_dim_2}D")
-            else:
-                self.feature_dim_2 = 1  # 1D for new methods without enhancement
+            actual_feature_dim_0 = 3  # Original 3D features
         else:
-            # New normalization methods use 1D 0-cells
-            self.feature_dim_0 = 1  # Override to 1D for new methods
-            if use_geco_features:
-                self.feature_dim_1 = 2 + 2  # 2D concatenated + 2D GECO features = 4D
-                print(f"Using GECO-enhanced edge features: {self.feature_dim_1}D")
-            else:
-                self.feature_dim_1 = 2  # 2D concatenated features
-                print(f"Using standard edge features: {self.feature_dim_1}D")
+            actual_feature_dim_0 = 1  # New methods use 1D features
             
-            if use_enhanced_2cell_features:
-                self.feature_dim_2 = 8  # 8D: mean, sd, min, max for sensors and actuators
-                print(f"Using enhanced 2-cell features: {self.feature_dim_2}D")
-            else:
-                self.feature_dim_2 = 1  # 1D for new methods without enhancement
+        if self.use_geco_features:
+            if actual_feature_dim_0 == 3:  # Original implementation
+                self.feature_dim_1 = actual_feature_dim_0 * 2 + 1  # 2d + 1D GECO = 7D
+            else:  # New implementation with 1D 0-cells
+                self.feature_dim_1 = 2 + 1  # 2D concatenated + 1D GECO = 3D
+            print(f"Using simplified GECO edge features: {self.feature_dim_1}D")
+        else:
+            if actual_feature_dim_0 == 3:  # Original implementation
+                self.feature_dim_1 = actual_feature_dim_0 * 2  # 6D concatenated features
+            else:  # New implementation with 1D 0-cells
+                self.feature_dim_1 = 2  # 2D concatenated features
+            print(f"Using standard edge features: {self.feature_dim_1}D")
+        
+        # Override the feature_dim_0 for consistency
+        self.feature_dim_0 = actual_feature_dim_0
+        
+        # Set 2-cell feature dimensions
+        if use_enhanced_2cell_features:
+            self.feature_dim_2 = 4  # 4D: mean/std for sensors, median/range for actuators
+            print(f"Using simplified 2-cell features: {self.feature_dim_2}D")
+        else:
+            self.feature_dim_2 = 1  # 1D for new methods without enhancement
+            print(f"Using standard 2-cell features: {self.feature_dim_2}D")
         
         # Process data and create features
         self.preprocess_features()
@@ -370,18 +381,16 @@ class SWaTDataset(Dataset):
                 # Add GECO features if enabled
                 if self.use_geco_features:
                     if geco_features is not None:
-                        # Add simplified GECO features: [strength, equation_type]
-                        equation_type = 1.0 if geco_features['geco_equation'] == 'Product' else 0.0
+                        # Simplified GECO features: only normalized strength
                         geco_feat = torch.tensor([
-                            geco_features['geco_strength'],
-                            equation_type
+                            geco_features['geco_normalized_strength']  # Only normalized strength
                         ], dtype=torch.float32)
                     else:
                         # Default GECO features for non-GECO edges
-                        geco_feat = torch.tensor([0.0, 0.0], dtype=torch.float32)
+                        geco_feat = torch.tensor([0.0], dtype=torch.float32)  # Zero strength for non-GECO
                     
-                    # Concatenate original features with GECO features
-                    edge_feat = torch.cat([edge_feat, geco_feat], dim=0)  # 8D total feature
+                    # Concatenate original features with simplified GECO features
+                    edge_feat = torch.cat([edge_feat, geco_feat], dim=0)  # 3D total feature (2D + 1D GECO)
                 
                 x_1[sample_idx, new_cell_idx] = edge_feat
 
@@ -448,18 +457,16 @@ class SWaTDataset(Dataset):
                 # Add GECO features if enabled
                 if self.use_geco_features:
                     if geco_features is not None:
-                        # Add simplified GECO features: [strength, equation_type]
-                        equation_type = 1.0 if geco_features['geco_equation'] == 'Product' else 0.0
+                        # Simplified GECO features: only normalized strength
                         geco_feat = torch.tensor([
-                            geco_features['geco_strength'],
-                            equation_type
+                            geco_features['geco_normalized_strength']  # Only normalized strength
                         ], dtype=torch.float32)
                     else:
                         # Default GECO features for non-GECO edges
-                        geco_feat = torch.tensor([0.0, 0.0], dtype=torch.float32)
+                        geco_feat = torch.tensor([0.0], dtype=torch.float32)  # Zero strength for non-GECO
                     
-                    # Concatenate original features with GECO features
-                    edge_feat = torch.cat([edge_feat, geco_feat], dim=0)  # 4D total feature
+                    # Concatenate original features with simplified GECO features
+                    edge_feat = torch.cat([edge_feat, geco_feat], dim=0)  # 3D total feature (2D + 1D GECO)
                 
                 x_1[sample_idx, new_cell_idx] = edge_feat
 
@@ -606,9 +613,10 @@ class SWaTDataset(Dataset):
 
     def _compute_enhanced_x2(self, node_index_map):
         """
-        Enhanced 2-cell features: 8D vector with mean, std, min, max for both sensors and actuators.
+        Compute enhanced 2-cell features with 4D vectors:
+        [sensor_mean, sensor_std, actuator_median, actuator_range]
         """
-        print("Computing enhanced 2-cell features (8D: mean, std, min, max for sensors and actuators)...")
+        print("Computing simplified 2-cell features (4D: mean/std for sensors, median/range for actuators)...")
         num_samples = len(self.data)
         
         _, col_dict_12, _ = self.complex.incidence_matrix(1, 2, index=True)
@@ -638,25 +646,23 @@ class SWaTDataset(Dataset):
             for cell_idx in range(num_2_cells):
                 sensor_indices, actuator_indices = cell_to_nodes[cell_idx]
                 
-                enhanced_feat = torch.zeros(self.feature_dim_2)
+                simplified_feat = torch.zeros(self.feature_dim_2)
                 
+                # Sensor features: mean and std
                 if sensor_indices:
                     sensor_features = sample_x0[sensor_indices]
-                    enhanced_feat[0] = torch.mean(sensor_features)
-                    enhanced_feat[1] = torch.std(sensor_features) if len(sensor_indices) > 1 else 0.0
-                    enhanced_feat[2] = torch.min(sensor_features)
-                    enhanced_feat[3] = torch.max(sensor_features)
+                    simplified_feat[0] = torch.mean(sensor_features)
+                    simplified_feat[1] = torch.std(sensor_features) if len(sensor_indices) > 1 else 0.0
                 
+                # Actuator features: median and range
                 if actuator_indices:
                     actuator_features = sample_x0[actuator_indices]
-                    enhanced_feat[4] = torch.mean(actuator_features)
-                    enhanced_feat[5] = torch.std(actuator_features) if len(actuator_indices) > 1 else 0.0
-                    enhanced_feat[6] = torch.min(actuator_features)
-                    enhanced_feat[7] = torch.max(actuator_features)
+                    simplified_feat[2] = torch.median(actuator_features)
+                    simplified_feat[3] = torch.max(actuator_features) - torch.min(actuator_features)  # range
                 
-                x_2[sample_idx, cell_idx] = enhanced_feat
+                x_2[sample_idx, cell_idx] = simplified_feat
         
-        print(f"Computed enhanced 2-cell features shape: {x_2.shape}")
+        print(f"Computed simplified 2-cell features shape: {x_2.shape}")
         return x_2
 
     def create_adjacency_matrices(self):

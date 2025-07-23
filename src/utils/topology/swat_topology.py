@@ -80,43 +80,177 @@ class SWATComplex:
             return {}
     
     def _get_geco_relationships(self):
-        """Convert GECO relationships to edge format"""
+        """Convert GECO relationships to edge format with proper parameter handling"""
         if not self.geco_relationships:
             return []
-        
+
         relationships = []
+        edge_strengths = {}  # For merging duplicate edges: {edge_key: [edge_infos]}
+        
+        print("Processing GECO relationships with corrected parameter indexing...")
         
         for target_component, details in self.geco_relationships.items():
             combination = details['combination']
             parameters = details['parameters']
             equation = details['equation']
             error = details['error']
+            threshold = details.get('threshold', 0.0)
             
-            # Create relationships between inputs and target
-            for i, input_component in enumerate(combination):
-                if input_component != target_component:  # Skip self-loops
-                    # Get the parameter strength for this input
-                    # Parameters[0] is usually the self-coefficient, parameters[1:] are input coefficients
-                    if i < len(parameters) - 1:  # -1 because parameters[0] is self-coefficient
-                        param_strength = abs(parameters[i + 1])  # +1 to skip self-coefficient
-                    else:
-                        param_strength = 1.0  # Default if parameter missing
+            print(f"\n--- Processing {target_component} ({equation}) ---")
+            print(f"Combination: {combination}")
+            print(f"Parameters: {parameters}")
+            print(f"Length: combination={len(combination)}, parameters={len(parameters)}")
+            
+            # Handle different equation types
+            if equation == 'Sum':
+                # Sum: b0 + Σbi·ui (self_coeff + input_coeffs + optional_bias)
+                has_bias = len(parameters) > len(combination)
+                param_end = len(combination)  # Don't include bias
+                
+                print(f"Sum equation - has_bias: {has_bias}")
+                
+                # Extract input coefficients (excluding self) for normalization
+                input_coeffs = []
+                for i, input_component in enumerate(combination):
+                    if input_component != target_component and i < len(parameters):
+                        coeff = parameters[i]
+                        input_coeffs.append(abs(coeff))
+                        print(f"  Input {input_component}: coeff={coeff:.6f}, strength={abs(coeff):.6f}")
+                
+                # Normalize by sum of absolute input coefficients
+                total_input_strength = sum(input_coeffs) if input_coeffs else 1.0
+                print(f"  Total input strength: {total_input_strength:.6f}")
+                
+                # Create edges for each input component
+                for i, input_component in enumerate(combination):
+                    if input_component != target_component and i < len(parameters):
+                        raw_coeff = parameters[i]
+                        raw_strength = abs(raw_coeff)
+                        normalized_strength = raw_strength / total_input_strength if total_input_strength > 0 else 0.0
+                        
+                        self._add_edge_info(edge_strengths, input_component, target_component, 
+                                          raw_coeff, raw_strength, normalized_strength, 
+                                          equation, error, threshold, has_bias)
+                        
+            elif equation == 'Product':
+                # Product: b0 + Πbi·ui 
+                # Treat like Sum but with individual coefficients for each input
+                print(f"Product equation - treating coefficients like Sum")
+                
+                # For Product equations, we have fewer parameters than combination length
+                # Map available parameters to input components (excluding self)
+                input_components = [comp for comp in combination if comp != target_component]
+                
+                if len(parameters) > 1:
+                    # Available coefficients for inputs (excluding self coefficient)
+                    input_coeffs = parameters[1:]  # Skip self coefficient
                     
-                    description = f"GECO {equation}: {input_component} → {target_component} (strength={param_strength:.4f}, error={error:.6f})"
+                    print(f"  Available input coefficients: {input_coeffs}")
+                    print(f"  Input components: {input_components}")
                     
-                    relationships.append((
-                        input_component, 
-                        target_component, 
-                        description,
-                        {
-                            'geco_strength': param_strength,
-                            'geco_equation': equation,
-                            'geco_error': error,
-                            'geco_threshold': details.get('threshold', 0.0)
-                        }
-                    ))
+                    # Extract input coefficients for normalization
+                    valid_coeffs = []
+                    for i, coeff in enumerate(input_coeffs):
+                        if i < len(input_components):
+                            valid_coeffs.append(abs(coeff))
+                            print(f"    {input_components[i]}: coeff={coeff:.6f}, strength={abs(coeff):.6f}")
+                    
+                    # Normalize by sum of absolute coefficients (same as Sum equations)
+                    total_input_strength = sum(valid_coeffs) if valid_coeffs else 1.0
+                    print(f"  Total input strength: {total_input_strength:.6f}")
+                    
+                    # Create edges for each input component with available coefficients
+                    for i, input_component in enumerate(input_components):
+                        if i < len(input_coeffs):
+                            raw_coeff = input_coeffs[i]
+                            raw_strength = abs(raw_coeff)
+                            normalized_strength = raw_strength / total_input_strength if total_input_strength > 0 else 0.0
+                            
+                            self._add_edge_info(edge_strengths, input_component, target_component,
+                                              raw_coeff, raw_strength, normalized_strength,
+                                              equation, error, threshold, False)
+                            
+                            print(f"    {input_component} → {target_component}: strength={raw_strength:.6f}, norm={normalized_strength:.6f}")
+                        else:
+                            print(f"    Warning: No coefficient available for {input_component}")
+                else:
+                    print(f"  Warning: Product equation has insufficient parameters")
+            else:
+                print(f"  Warning: Unknown equation type: {equation}")
+        
+        print(f"\nFound {len(edge_strengths)} unique edges before merging duplicates")
+        
+        # Merge duplicate edges by taking maximum strength
+        merged_count = 0
+        for edge_key, edge_infos in edge_strengths.items():
+            if len(edge_infos) == 1:
+                # Single edge
+                info = edge_infos[0]
+                merged_strength = info['raw_strength']
+                merged_normalized = info['normalized_strength']
+                direction = f"{info['source']} → {info['target']}"
+                dominant_info = info
+            else:
+                # Multiple edges - merge by taking maximum strength
+                dominant_info = max(edge_infos, key=lambda x: x['raw_strength'])
+                merged_strength = max(info['raw_strength'] for info in edge_infos)
+                merged_normalized = max(info['normalized_strength'] for info in edge_infos)
+                
+                # Create bidirectional description
+                directions = [f"{info['source']} → {info['target']}" for info in edge_infos]
+                direction = " & ".join(directions)
+                merged_count += 1
+                print(f"Merged edge {edge_key}: {len(edge_infos)} relationships, max_strength={merged_strength:.6f}")
+        
+            node1, node2 = edge_key
+            description = f"GECO {dominant_info['equation']}: {direction} (strength={merged_strength:.4f}, error={dominant_info['error']:.6f})"
+            
+            relationships.append((
+                node1,
+                node2, 
+                description,
+                {
+                    'geco_strength': float(merged_strength),
+                    'geco_normalized_strength': float(merged_normalized),
+                    'geco_equation': dominant_info['equation'],
+                    'geco_error': dominant_info['error'],
+                    'geco_threshold': dominant_info['threshold'],
+                    'geco_direction': direction,
+                    'geco_edge_count': len(edge_infos),
+                    'geco_has_bias': dominant_info['has_bias']
+                }
+            ))
+        
+        print(f"Created {len(relationships)} unique edges ({merged_count} were merged from duplicates)")
+        
+        # Store edge lookup for efficient feature retrieval
+        self._geco_edge_lookup = {}
+        for node1, node2, desc, attrs in relationships:
+            edge_key = tuple(sorted([node1, node2]))
+            self._geco_edge_lookup[edge_key] = attrs
         
         return relationships
+    
+    def _add_edge_info(self, edge_strengths, input_component, target_component, 
+                      raw_coeff, raw_strength, normalized_strength, equation, error, threshold, has_bias):
+        """Helper method to add edge information to the edge_strengths dictionary"""
+        edge_key = tuple(sorted([input_component, target_component]))
+        
+        edge_info = {
+            'source': input_component,
+            'target': target_component,
+            'raw_coeff': raw_coeff,
+            'raw_strength': raw_strength,
+            'normalized_strength': normalized_strength,
+            'equation': equation,
+            'error': error,
+            'threshold': threshold,
+            'has_bias': has_bias
+        }
+        
+        if edge_key not in edge_strengths:
+            edge_strengths[edge_key] = []
+        edge_strengths[edge_key].append(edge_info)
     
     def _is_sensor(self, component):
         """Check if a component is a sensor based on its naming pattern"""
@@ -339,35 +473,15 @@ class SWATComplex:
         dict or None
             Dictionary with GECO features if relationship exists, None otherwise
         """
-        if not self.use_geco_relationships or not self.geco_relationships:
+        if not self.use_geco_relationships or not hasattr(self, '_geco_edge_lookup'):
             return None
             
-        # Sort nodes for consistent lookup
-        node1, node2 = sorted(boundary_nodes)
+        # Create canonical edge key (sorted order)
+        edge_key = tuple(sorted(boundary_nodes))
         
-        # Check if either node has a GECO relationship involving the other
-        for component in [node1, node2]:
-            if component in self.geco_relationships:
-                geco_info = self.geco_relationships[component]
-                
-                # Check if the other node is in the GECO combination
-                other_node = node2 if component == node1 else node1
-                
-                # Look for the other node in the combination
-                if other_node in geco_info['combination']:
-                    # Find the parameter index for this connection
-                    param_index = geco_info['combination'].index(other_node)
-                    
-                    # Get the parameter value (coefficient)
-                    if param_index < len(geco_info['parameters']):
-                        param_value = abs(geco_info['parameters'][param_index])  # Use absolute value as strength
-                        
-                        return {
-                            'geco_strength': float(param_value),
-                            'geco_equation': geco_info['equation'],
-                            'geco_component': component,  # Which component this relationship describes
-                            'geco_direction': 'forward' if component == node1 else 'reverse'  # Direction of relationship
-                        }
+        # Look up in the precomputed edge lookup dictionary
+        if edge_key in self._geco_edge_lookup:
+            return self._geco_edge_lookup[edge_key].copy()  # Return copy to avoid modification
         
         return None
     

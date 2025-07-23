@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from torch.utils.data import DataLoader
 import torch
+import random
 
 # Imports assuming the new structure
 from src.utils.topology.swat_topology import SWATComplex
@@ -11,6 +12,18 @@ from src.utils.attack_utils import get_attack_indices, get_attack_sds
 from src.datasets.swat_dataset import SWaTDataset
 from src.models.ccann import AnomalyCCANN
 from src.trainers.anomaly_trainer import AnomalyTrainer
+
+
+def set_seed(seed=42):
+    """Set random seed for reproducibility"""
+    print(f"Setting random seed to {seed} for reproducibility")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def load_swat_data(train_path, test_path, sample_rate=1.0, save_test_path=None, validation_split_ratio=0.2, 
@@ -291,6 +304,10 @@ def analyze_attack_detection(trainer, anomaly_map, component_names):
 def run_experiment(config):
     """Main function to run SWAT experiment based on a config dictionary."""
     print("Starting SWAT Anomaly Detection Experiment (3-level)...")
+    
+    # Set seed for reproducibility
+    seed = config.get('seed', 42)
+    set_seed(seed)
 
     # Set device from config
     device = config['system']['device']
@@ -368,14 +385,16 @@ def run_experiment(config):
             'temporal_sample_rate': config['data']['temporal_sample_rate'],
             'use_geco_features': use_geco_features,
             'normalization_method': normalization_method,
-            'use_enhanced_2cell_features': use_enhanced_2cell_features
+            'use_enhanced_2cell_features': use_enhanced_2cell_features,
+            'seed': seed
         }
     else:
         dataset_args = {
             'temporal_mode': False,
             'use_geco_features': use_geco_features,
             'normalization_method': normalization_method,
-            'use_enhanced_2cell_features': use_enhanced_2cell_features
+            'use_enhanced_2cell_features': use_enhanced_2cell_features,
+            'seed': seed
         }
 
     train_dataset = SWaTDataset(train_data, swat_complex, **dataset_args)
@@ -477,7 +496,7 @@ def run_experiment(config):
         sd_multiplier=config.get('anomaly_detection', {}).get('sd_multiplier', 2.5),
         use_component_thresholds=config.get('anomaly_detection', {}).get('use_component_thresholds', False),
         use_two_threshold_alarm=config.get('anomaly_detection', {}).get('use_two_threshold_alarm', False),
-        plc_low_percentile=config.get('anomaly_detection', {}).get('plc_low_percentile', 98.0),
+        plc_low_percentile=config.get('anomaly_detection', {}).get('plc_low_percentile', 99.0),
         plc_high_percentile=config.get('anomaly_detection', {}).get('plc_high_percentile', 99.9),
 
         # Pass the corrected evaluation config block
