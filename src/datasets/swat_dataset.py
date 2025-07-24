@@ -218,9 +218,9 @@ class SWaTDataset(Dataset):
                 
                 # Handle case where min == max (constant values)
                 if range_val == 0:
-                    # If all values are the same, set to 0.5 (middle of [0,1] range)
+                    # If all values are the same, keep the original constant value
                     normalized_values = np.full_like(values, max_val, dtype=float)
-                    print(f"  {col} (actuator): constant value={min_val:.4f}, normalized to {max_val:.4f}")
+                    print(f"  {col} (actuator): constant value={min_val:.4f}, kept as-is")
                 else:
                     # Min-max normalize: (x - min) / (max - min)
                     normalized_values = (values - min_val) / range_val
