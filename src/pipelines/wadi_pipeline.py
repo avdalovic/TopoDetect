@@ -4,8 +4,9 @@ import pandas as pd
 import numpy as np
 from torch.utils.data import DataLoader
 import torch
+import random
 
-# Imports for WADI
+# Imports assuming the new structure
 from src.utils.topology.wadi_topology import WADIComplex
 from src.utils.attack_utils import get_attack_indices, get_attack_sds
 from src.datasets.wadi_dataset import WADIDataset
@@ -13,8 +14,21 @@ from src.models.ccann import AnomalyCCANN
 from src.trainers.anomaly_trainer import AnomalyTrainer
 
 
+def set_seed(seed=42):
+    """Set random seed for reproducibility"""
+    print(f"Setting random seed to {seed} for reproducibility")
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def load_wadi_data(train_path, test_path, sample_rate=1.0, save_test_path=None, validation_split_ratio=0.2, 
-                  attack_focused_sampling=False, pre_attack_points=10, attack_start_points=5):
+                  attack_focused_sampling=False, pre_attack_points=10, attack_start_points=5, 
+                  remove_stabilization_points=0):
     """
     Load WADI dataset from CSV files with optional sampling and validation split.
 
@@ -36,6 +50,10 @@ def load_wadi_data(train_path, test_path, sample_rate=1.0, save_test_path=None, 
         Number of points to include before each attack when using attack_focused_sampling
     attack_start_points : int, default=5
         Number of points to include from the beginning of each attack
+    remove_stabilization_points : int, default=0
+        Number of initial data points to remove from training data for stabilization.
+        Based on WADI analysis, 0 is recommended (WADI is stable from start).
+        Use values like 3600 (1h) or 7200 (2h) only for experimentation.
 
     Returns
     -------
@@ -45,10 +63,22 @@ def load_wadi_data(train_path, test_path, sample_rate=1.0, save_test_path=None, 
     print(f"Loading WADI data from {train_path} and {test_path}...")
     print(f"Using sample rate: {sample_rate}")
     print(f"Using validation split ratio: {validation_split_ratio}")
+    print(f"Remove stabilization points: {remove_stabilization_points}")
 
     # Load data
     initial_train_data = pd.read_csv(train_path)
     test_data = pd.read_csv(test_path)
+    
+    # Optional stabilization removal for WADI (default: no removal based on analysis)
+    if remove_stabilization_points > 0:
+        if len(initial_train_data) > remove_stabilization_points:
+            print(f"Removing first {remove_stabilization_points} data points for WADI stabilization (experimental)")
+            initial_train_data = initial_train_data.iloc[remove_stabilization_points:].reset_index(drop=True)
+            print(f"Training data after stabilization removal: {len(initial_train_data)} samples")
+        else:
+            print(f"Warning: Training data has only {len(initial_train_data)} samples, cannot remove {remove_stabilization_points} points")
+    else:
+        print("WADI data is stable from the start - no stabilization removal needed (recommended)")
 
     # Apply sampling to training data (always use linspace approach)
     if sample_rate < 1.0:
@@ -167,23 +197,18 @@ def load_wadi_data(train_path, test_path, sample_rate=1.0, save_test_path=None, 
              print("Warning: Not enough data in initial_train_data to perform validation split.")
         else:
              print("No validation split performed.")
+    # --- End Manual Split ---
 
-    # Convert 'Attack' column to binary (WADI uses 'Attack' not 'Normal/Attack')
-    if 'Attack' in train_data.columns:
-        train_data['Normal/Attack'] = train_data['Attack'].map(lambda x: 0 if x == 0 else 1)
-        if not validation_data.empty:
-            validation_data['Normal/Attack'] = validation_data['Attack'].map(lambda x: 0 if x == 0 else 1)
-        test_data['Normal/Attack'] = test_data['Attack'].map(lambda x: 0 if x == 0 else 1)
-    else:
-        # Handle case where it might already be 'Normal/Attack'
-        train_data['Normal/Attack'] = train_data['Normal/Attack'].map(lambda x: 0 if (x == 'False' or x == 0 or x == 0.0 or x == 'Normal') else 1)
-        if not validation_data.empty:
-            validation_data['Normal/Attack'] = validation_data['Normal/Attack'].map(lambda x: 0 if (x == 'False' or x == 0 or x == 0.0 or x == 'Normal') else 1)
-        test_data['Normal/Attack'] = test_data['Normal/Attack'].map(lambda x: 0 if (x == 'False' or x == 0 or x == 0.0 or x == 'Normal') else 1)
+    # Convert 'Attack' to boolean/int for consistency
+    train_data['Attack'] = train_data['Attack'].astype(int)
+    if not validation_data.empty:
+        validation_data['Attack'] = validation_data['Attack'].astype(int)
+    # Ensure test data labels are also 0 or 1
+    test_data['Attack'] = test_data['Attack'].astype(int)
     
     # Check label distribution and print it for verification
-    normal_test = (test_data['Normal/Attack'] == 0).sum()
-    attack_test = (test_data['Normal/Attack'] == 1).sum()
+    normal_test = (test_data['Attack'] == 0).sum()
+    attack_test = (test_data['Attack'] == 1).sum()
     print(f"Test data contains {normal_test} normal samples and {attack_test} attack samples")
     print(f"Attack percentage: {attack_test/len(test_data)*100:.2f}%")
 
@@ -223,8 +248,8 @@ def load_saved_test_data(file_path):
     print(f"Loaded test data with {len(test_data)} samples")
     
     # Print label distribution
-    normal_test = (test_data['Normal/Attack'] == 0.0).sum()
-    attack_test = (test_data['Normal/Attack'] == 1.0).sum()
+    normal_test = (test_data['Attack'] == 0.0).sum()
+    attack_test = (test_data['Attack'] == 1.0).sum()
     print(f"Test data contains {normal_test} normal samples and {attack_test} attack samples")
     print(f"Attack percentage: {attack_test/len(test_data)*100:.2f}%")
     
@@ -233,6 +258,10 @@ def load_saved_test_data(file_path):
 def run_experiment(config):
     """Main function to run WADI experiment based on a config dictionary."""
     print("Starting WADI Anomaly Detection Experiment (3-level)...")
+    
+    # Set seed for reproducibility
+    seed = config.get('seed', 42)
+    set_seed(seed)
 
     # Set device from config
     device = config['system']['device']
@@ -255,13 +284,15 @@ def run_experiment(config):
         test_data = load_saved_test_data(saved_test_path)
 
         # Since test data is loaded, we only need to load train and validation sets.
+        # We call load_wadi_data but ignore its test_data output and prevent it from saving.
         print("Loading corresponding training and validation data...")
         train_data, validation_data, _ = load_wadi_data(
             train_path=train_path,
             test_path=test_path,  # Still required by the function, will be loaded and discarded
             sample_rate=config['data']['sample_rate'],
             save_test_path=None,  # Do not save again
-            validation_split_ratio=config['data']['validation_split_ratio']
+            validation_split_ratio=config['data']['validation_split_ratio'],
+            remove_stabilization_points=config['data'].get('remove_stabilization_points', 0)
         )
     else:
         print("Creating new train/validation/test split and saving test data...")
@@ -270,41 +301,80 @@ def run_experiment(config):
             test_path=test_path,
             sample_rate=config['data']['sample_rate'],
             save_test_path=saved_test_path, # Save for next time
-            validation_split_ratio=config['data']['validation_split_ratio']
+            validation_split_ratio=config['data']['validation_split_ratio'],
+            remove_stabilization_points=config['data'].get('remove_stabilization_points', 0)
         )
 
-    # Load WADI topology
-    print("Loading WADI topology...")
+    # Create WADI topology complex
+    print("Creating WADI topology complex...")
     
-    # Get component names for WADI topology - use same exclude list as WADIDataset
-    exclude_columns = ['Timestamp', 'Normal/Attack', 'Attack', 'Row', 'Date', 'Time', 
-                      '2B_AIT_002_PV', '2_LS_001_AL', '2_LS_002_AL', '2_P_001_STATUS', 
-                      '2_P_002_STATUS', 'LEAK_DIFF_PRESSURE', 'PLANT_START_STOP_LOG', 
-                      'TOTAL_CONS_REQUIRED_FLOW']
-    component_names = [col for col in train_data.columns if col not in exclude_columns]
-    print(f"DEBUG: Building WADI topology with {len(component_names)} components")
-    wadi_complex = WADIComplex(component_names)
-
-    temporal_mode = config['data']['temporal_mode']
-
+    # Get filtered component names (after removing problematic features)
+    # We'll create a temporary dataset just to get the filtered component names
+    temp_data = train_data.copy()
+    exclude_columns = ['Row', 'Date', 'Time', 'Attack', 'Normal/Attack']
+    all_columns = [col for col in temp_data.columns if col not in exclude_columns]
+    
+    # Remove problematic features
+    remove_list = [
+        '2B_AIT_002_PV', '2_LS_001_AL', '2_LS_002_AL', '2_P_001_STATUS', '2_P_002_STATUS',
+        'LEAK_DIFF_PRESSURE', 'PLANT_START_STOP_LOG', 'TOTAL_CONS_REQUIRED_FLOW'
+    ]
+    
+    filtered_components = [col for col in all_columns if col not in remove_list]
+    print(f"Creating WADI complex with {len(filtered_components)} components (after filtering)")
+    
+    # Create WADI complex with GECO relationships
+    use_geco_relationships = config.get('topology', {}).get('use_geco_relationships', True)
+    wadi_complex = WADIComplex(component_names=filtered_components, use_geco_relationships=use_geco_relationships)
+    complex_obj = wadi_complex.get_complex()
+    
+    print(f"WADI complex created: {complex_obj}")
+    
     # Create datasets
-    print(f"Creating datasets (train, validation, test) in {'temporal' if temporal_mode else 'reconstruction'} mode...")
-    if temporal_mode:
-        dataset_args = {
-            'temporal_mode': True,
-            'n_input': config['model']['n_input'],
-            'temporal_sample_rate': config['data']['temporal_sample_rate']
-        }
-    else:
-        dataset_args = {'temporal_mode': False}
-
-    train_dataset = WADIDataset(train_data, wadi_complex, **dataset_args)
-    validation_dataset = WADIDataset(validation_data, wadi_complex, **dataset_args) if not validation_data.empty else None
-    test_dataset = WADIDataset(test_data, wadi_complex, **dataset_args)
+    print("Creating datasets (train, validation, test) in reconstruction mode...")
+    print(f"Feature engineering config: normalization={config['data']['normalization_method']}, enhanced_2cell={config['data']['use_enhanced_2cell_features']}")
+    
+    train_dataset = WADIDataset(
+        data=train_data,
+        wadi_complex=wadi_complex,
+        temporal_mode=config['data']['temporal_mode'],
+        temporal_sample_rate=config['data']['temporal_sample_rate'],
+        normalization_method=config['data']['normalization_method'],
+        use_enhanced_2cell_features=config['data']['use_enhanced_2cell_features'],
+        seed=config.get('seed', 42)
+    )
+    
+    # Get expected feature count from training dataset
+    expected_feature_count = len(train_dataset.columns)
+    print(f"Training dataset established {expected_feature_count} features as the standard")
+    
+    validation_dataset = WADIDataset(
+        data=validation_data,
+        wadi_complex=wadi_complex,
+        temporal_mode=config['data']['temporal_mode'],
+        temporal_sample_rate=config['data']['temporal_sample_rate'],
+        normalization_method=config['data']['normalization_method'],
+        use_enhanced_2cell_features=config['data']['use_enhanced_2cell_features'],
+        seed=config.get('seed', 42)
+    )
+    # Ensure validation dataset matches training feature count
+    validation_dataset.expected_feature_count = expected_feature_count
+    
+    test_dataset = WADIDataset(
+        data=test_data,
+        wadi_complex=wadi_complex,
+        temporal_mode=config['data']['temporal_mode'],
+        temporal_sample_rate=config['data']['temporal_sample_rate'],
+        normalization_method=config['data']['normalization_method'],
+        use_enhanced_2cell_features=config['data']['use_enhanced_2cell_features'],
+        seed=config.get('seed', 42)
+    )
+    # Ensure test dataset matches training feature count
+    test_dataset.expected_feature_count = expected_feature_count
 
     # Create dataloaders
     batch_size = config['training']['batch_size']
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=False)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=False) # Turn off pin_memory
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     if validation_dataset:
@@ -312,13 +382,16 @@ def run_experiment(config):
     else:
         validation_dataloader = None
         print("Warning: No validation data available. Threshold will be calibrated on training data.")
+        if config['anomaly_detection']['threshold_method'] != 'train':
+            print("Switching to 'train' thresholding method.")
+            config['anomaly_detection']['threshold_method'] = 'train'
 
     if validation_dataloader is None:
          print("Error: Validation dataloader could not be created. Check validation_split_ratio.")
          return
 
     # Create model
-    print(f"Creating model in {'temporal' if temporal_mode else 'reconstruction'} mode...")
+    print(f"Creating model in {'temporal' if config['data']['temporal_mode'] else 'reconstruction'} mode...")
     
     # Get feature dimensions from the dataset
     original_feature_dims = {
@@ -328,20 +401,37 @@ def run_experiment(config):
     }
     print(f"Using feature dimensions: {original_feature_dims}")
     
+    if config['data'].get('use_geco_features', False):
+        print("GECO features are enabled in the dataset.")
+    else:
+        print("GECO features are disabled.")
+    
+    # Dynamically update model input channels based on dataset feature dimensions
+    # This ensures the model architecture from the config is respected while using correct input dimensions
+    channels_per_layer = config['model']['channels_per_layer']
+    in_channels = [
+        train_dataset.feature_dim_0,
+        train_dataset.feature_dim_1,
+        train_dataset.feature_dim_2
+    ]
+    channels_per_layer[0][0] = in_channels
+    print(f"Dynamically updated model input channels to: {in_channels}")
+
     model = AnomalyCCANN(
-        config['model']['channels_per_layer'], 
+        channels_per_layer, 
         original_feature_dims=original_feature_dims,
-        temporal_mode=temporal_mode,
-        n_input=config['model'].get('n_input', 10)
+        temporal_mode=config['data']['temporal_mode'],
+        n_input=config['model'].get('n_input', 10) # Get n_input safely
     )
 
     # Create trainer with validation dataloader
     print("Creating trainer with validation set for thresholding...")
     
-    # Process evaluation config
+    # Correction: Rename 'method' key from config to 'evaluation_method' for trainer
     eval_config = config.get('evaluation', {})
     if 'method' in eval_config:
         eval_config['evaluation_method'] = eval_config.pop('method')
+    # Correction: Rename 'fp_alarm_window_seconds' to 'fp_alarm_window'
     if 'fp_alarm_window_seconds' in eval_config:
         eval_config['fp_alarm_window'] = eval_config.pop('fp_alarm_window_seconds')
     
@@ -378,6 +468,10 @@ def run_experiment(config):
         threshold_percentile=config.get('anomaly_detection', {}).get('threshold_percentile', 99.0),
         sd_multiplier=config.get('anomaly_detection', {}).get('sd_multiplier', 2.5),
         use_component_thresholds=config.get('anomaly_detection', {}).get('use_component_thresholds', False),
+        use_two_threshold_alarm=config.get('anomaly_detection', {}).get('use_two_threshold_alarm', False),
+        plc_low_percentile=config.get('anomaly_detection', {}).get('plc_low_percentile', 99.0),
+        plc_high_percentile=config.get('anomaly_detection', {}).get('plc_high_percentile', 99.9),
+
         # Pass the corrected evaluation config block
         **eval_config
     )
@@ -401,5 +495,5 @@ def run_experiment(config):
     with open(results_path, 'wb') as f:
         pickle.dump(final_test_results, f)
     print(f"Final results saved to {results_path}")
-    
+
     print("Experiment finished successfully!") 

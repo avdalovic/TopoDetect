@@ -7,14 +7,22 @@ from torch import nn
 import wandb
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import pandas as pd
+import seaborn as sns
+from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
 
-# New imports for CUSUM and advanced metrics
+# Import CUSUM if available
 try:
     from src.utils.cusum import CUSUM
     CUSUM_AVAILABLE = True
 except ImportError:
     CUSUM_AVAILABLE = False
-    print("Warning: CUSUM not available. Only threshold method will work.")
+    print("Warning: CUSUM module not available. Only threshold-based evaluation will work.")
+
+# Import for EVT thresholding
+from scipy.stats import genpareto
+
+import matplotlib.patches as patches
 from src.utils.metrics import (
     calculate_standard_metrics, calculate_scenario_detection,
     calculate_fp_alarms, calculate_time_aware_metrics
@@ -74,6 +82,7 @@ class AnomalyTrainer:
         self.use_two_threshold_alarm = use_two_threshold_alarm
         self.plc_low_percentile = plc_low_percentile
         self.plc_high_percentile = plc_high_percentile
+        self.threshold_method = threshold_method # Store the method
         
         # CUSUM parameters
         self.evaluation_method = evaluation_method
@@ -197,26 +206,83 @@ class AnomalyTrainer:
                 target_x0 = sample['target_x0']
                 loss_0 = self.crit(x0_pred, target_x0).mean()
                 loss = loss_0
+                
+                # Check for NaN/inf in predictions and loss
+                if torch.any(torch.isnan(x0_pred)) or torch.any(torch.isinf(x0_pred)):
+                    print(f"WARNING: NaN/inf detected in x0_pred at batch {i}")
+                    print(f"x0_pred stats: min={x0_pred.min().item():.4f}, max={x0_pred.max().item():.4f}")
+                    continue  # Skip this batch
+                    
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"WARNING: NaN/inf loss detected at batch {i}: {loss.item()}")
+                    print(f"target_x0 stats: min={target_x0.min().item():.4f}, max={target_x0.max().item():.4f}")
+                    continue  # Skip this batch
+                
                 total_loss += loss.item()
             else: # Reconstruction mode
                 x_0, x_1, x_2, a0, a1, coa2, b1, b2, _ = self.to_device(sample)
                 
+                # Check for NaN/inf in input data
+                if torch.any(torch.isnan(x_0)) or torch.any(torch.isinf(x_0)):
+                    print(f"WARNING: NaN/inf detected in input x_0 at batch {i}")
+                    continue  # Skip this batch
+                
                 # Standard reconstruction training
                 x_0_recon, x_1_recon, x_2_recon = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2)
+                
+                # Check for NaN/inf in predictions
+                if torch.any(torch.isnan(x_0_recon)) or torch.any(torch.isinf(x_0_recon)):
+                    print(f"WARNING: NaN/inf detected in x_0_recon at batch {i}")
+                    continue  # Skip this batch
                 
                 loss_0 = self.crit(x_0_recon, x_0).mean()
                 loss_1 = self.crit(x_1_recon, x_1).mean()
                 loss_2 = self.crit(x_2_recon, x_2).mean()
                 loss = loss_0 + loss_1 + loss_2
+                
+                # Check for NaN/inf in individual losses
+                if torch.isnan(loss_0) or torch.isinf(loss_0):
+                    print(f"WARNING: NaN/inf loss_0 detected at batch {i}: {loss_0.item()}")
+                    continue  # Skip this batch
+                if torch.isnan(loss_1) or torch.isinf(loss_1):
+                    print(f"WARNING: NaN/inf loss_1 detected at batch {i}: {loss_1.item()}")
+                    continue  # Skip this batch
+                if torch.isnan(loss_2) or torch.isinf(loss_2):
+                    print(f"WARNING: NaN/inf loss_2 detected at batch {i}: {loss_2.item()}")
+                    continue  # Skip this batch
+                
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"WARNING: NaN/inf total loss detected at batch {i}: {loss.item()}")
+                    continue  # Skip this batch
+                
                 total_loss += loss.item()
 
             loss.backward()
+            
+            # Check for NaN/inf in gradients
+            has_nan_grad = False
+            for name, param in self.model.named_parameters():
+                if param.grad is not None:
+                    if torch.any(torch.isnan(param.grad)) or torch.any(torch.isinf(param.grad)):
+                        print(f"WARNING: NaN/inf gradient detected in {name} at batch {i}")
+                        has_nan_grad = True
+                        break
+            
+            if has_nan_grad:
+                self.opt.zero_grad()  # Clear bad gradients
+                continue  # Skip this optimization step
+            
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.grad_clip_value)
             self.opt.step()
             num_batches += 1
             
             if (i + 1) % log_interval == 0:
-                print(f"Progress: [{(i+1)/total_samples*100:.1f}%] | Loss: {total_loss / num_batches:.6f}")
+                avg_loss = total_loss / max(num_batches, 1)
+                print(f"Progress: [{(i+1)/total_samples*100:.1f}%] | Loss: {avg_loss:.6f} | Valid batches: {num_batches}")
+        
+        if num_batches == 0:
+            print("ERROR: No valid batches processed! All batches contained NaN/inf values.")
+            return float('inf')  # Return infinite loss to indicate failure
         
         return total_loss / num_batches
 
@@ -269,34 +335,108 @@ class AnomalyTrainer:
                 all_residuals_1 = torch.cat(all_residuals_1, dim=0)
                 all_residuals_2 = torch.cat(all_residuals_2, dim=0)
                 
-                # Calculate percentile thresholds for each level
-                error_per_sample_0 = torch.mean(all_residuals_0.cpu(), dim=(1, 2))
-                error_per_sample_1 = torch.mean(all_residuals_1.cpu(), dim=(1, 2))
-                error_per_sample_2 = torch.mean(all_residuals_2.cpu(), dim=(1, 2))
-                
-                self.anomaly_threshold_0 = np.percentile(error_per_sample_0.numpy(), self.threshold_percentile)
-                self.anomaly_threshold_1 = np.percentile(error_per_sample_1.numpy(), self.threshold_percentile)
-                
-                if self.use_two_threshold_alarm:
-                    self.anomaly_threshold_2_low = np.percentile(error_per_sample_2.numpy(), self.plc_low_percentile)
-                    self.anomaly_threshold_2_high = np.percentile(error_per_sample_2.numpy(), self.plc_high_percentile)
-                    print(f"Calibrated 3-level thresholds (two-threshold for PLCs):")
-                    print(f"  0-cells ({self.threshold_percentile}%): {self.anomaly_threshold_0:.4f}")
-                    print(f"  1-cells ({self.threshold_percentile}%): {self.anomaly_threshold_1:.4f}")
-                    print(f"  2-cells Low ({self.plc_low_percentile}%): {self.anomaly_threshold_2_low:.4f}")
-                    print(f"  2-cells High ({self.plc_high_percentile}%): {self.anomaly_threshold_2_high:.4f}")
+                if self.threshold_method == "evt":
+                    # Per-component EVT thresholding
+                    print("Using EVT (Extreme Value Theory) per-component thresholding...")
+                    
+                    # For 0-cells: per-component thresholds (shape: [n_samples, n_components, feature_dim])
+                    self.evt_thresholds_0 = self._fit_evt_thresholds(all_residuals_0.squeeze(-1))  # Remove feature dim
+                    
+                    # For 1-cells: per-edge thresholds (shape: [n_samples, n_edges, feature_dim])
+                    self.evt_thresholds_1 = self._fit_evt_thresholds(all_residuals_1.mean(-1))  # Average over feature dims
+                    
+                    # For 2-cells: per-PLC thresholds (shape: [n_samples, n_plcs, feature_dim])
+                    self.evt_thresholds_2 = self._fit_evt_thresholds(all_residuals_2.mean(-1))  # Average over feature dims
+                    
+                    print(f"Calibrated EVT thresholds:")
+                    print(f"  0-cells: {self.evt_thresholds_0.shape[0]} component-specific thresholds")
+                    print(f"  1-cells: {self.evt_thresholds_1.shape[0]} edge-specific thresholds") 
+                    print(f"  2-cells: {self.evt_thresholds_2.shape[0]} PLC-specific thresholds")
+                    print(f"  Sample thresholds - 0-cells: min={self.evt_thresholds_0.min():.4f}, max={self.evt_thresholds_0.max():.4f}")
+                    print(f"  Sample thresholds - 1-cells: min={self.evt_thresholds_1.min():.4f}, max={self.evt_thresholds_1.max():.4f}")
+                    print(f"  Sample thresholds - 2-cells: min={self.evt_thresholds_2.min():.4f}, max={self.evt_thresholds_2.max():.4f}")
+                    
                 else:
-                    self.anomaly_threshold_2 = np.percentile(error_per_sample_2.numpy(), self.threshold_percentile)
-                    print(f"Calibrated 3-level thresholds ({self.threshold_percentile}th percentile):")
-                    print(f"  0-cells: {self.anomaly_threshold_0:.4f}")
-                    print(f"  1-cells: {self.anomaly_threshold_1:.4f}")
-                    print(f"  2-cells: {self.anomaly_threshold_2:.4f}")
+                    # Original percentile-based thresholding
+                    # Calculate percentile thresholds for each level
+                    error_per_sample_0 = torch.mean(all_residuals_0.cpu(), dim=(1, 2))
+                    error_per_sample_1 = torch.mean(all_residuals_1.cpu(), dim=(1, 2))
+                    error_per_sample_2 = torch.mean(all_residuals_2.cpu(), dim=(1, 2))
+                    
+                    self.anomaly_threshold_0 = np.percentile(error_per_sample_0.numpy(), self.threshold_percentile)
+                    self.anomaly_threshold_1 = np.percentile(error_per_sample_1.numpy(), self.threshold_percentile)
+                    
+                    if self.use_two_threshold_alarm:
+                        self.anomaly_threshold_2_low = np.percentile(error_per_sample_2.numpy(), self.plc_low_percentile)
+                        self.anomaly_threshold_2_high = np.percentile(error_per_sample_2.numpy(), self.plc_high_percentile)
+                        print(f"Calibrated 3-level thresholds (two-threshold for PLCs):")
+                        print(f"  0-cells ({self.threshold_percentile}%): {self.anomaly_threshold_0:.4f}")
+                        print(f"  1-cells ({self.threshold_percentile}%): {self.anomaly_threshold_1:.4f}")
+                        print(f"  2-cells Low ({self.plc_low_percentile}%): {self.anomaly_threshold_2_low:.4f}")
+                        print(f"  2-cells High ({self.plc_high_percentile}%): {self.anomaly_threshold_2_high:.4f}")
+                    else:
+                        self.anomaly_threshold_2 = np.percentile(error_per_sample_2.numpy(), self.threshold_percentile)
+                        print(f"Calibrated 3-level thresholds ({self.threshold_percentile}th percentile):")
+                        print(f"  0-cells: {self.anomaly_threshold_0:.4f}")
+                        print(f"  1-cells: {self.anomaly_threshold_1:.4f}")
+                        print(f"  2-cells: {self.anomaly_threshold_2:.4f}")
             else:
                 # For temporal mode, only use 0-cells
-                error_per_sample_0 = torch.mean(all_residuals_0.cpu(), dim=(1, 2))
-                self.anomaly_threshold_0 = np.percentile(error_per_sample_0.numpy(), self.threshold_percentile)
-                print(f"Calibrated 0-cell threshold: {self.anomaly_threshold_0:.4f}")
+                if self.threshold_method == "evt":
+                    # Per-component EVT thresholding for temporal mode
+                    self.evt_thresholds_0 = self._fit_evt_thresholds(all_residuals_0.squeeze(-1))
+                    print(f"Calibrated EVT thresholds for temporal mode:")
+                    print(f"  0-cells: {self.evt_thresholds_0.shape[0]} component-specific thresholds")
+                else:
+                    error_per_sample_0 = torch.mean(all_residuals_0.cpu(), dim=(1, 2))
+                    self.anomaly_threshold_0 = np.percentile(error_per_sample_0.numpy(), self.threshold_percentile)
+                    print(f"Calibrated 0-cell threshold: {self.anomaly_threshold_0:.4f}")
+
+    def _fit_evt_thresholds(self, residuals, q=0.997):
+        """
+        Fit EVT (Extreme Value Theory) thresholds per component using Generalized Pareto Distribution.
+        
+        Parameters:
+        residuals: torch.Tensor of shape [n_samples, n_components]
+        q: quantile for threshold (default 0.997 = 99.7%)
+        
+        Returns:
+        torch.Tensor of thresholds for each component
+        """
+        n_components = residuals.shape[1]
+        thresholds = []
+        
+        for j in range(n_components):
+            data = residuals[:, j].cpu().numpy()
             
+            try:
+                # Ensure data is positive for GenPareto (shift if needed)
+                data_min = data.min()
+                if data_min <= 0:
+                    data_shifted = data - data_min + 1e-8
+                else:
+                    data_shifted = data
+                
+                # Fit Generalized Pareto Distribution
+                c, loc, scale = genpareto.fit(data_shifted)
+                
+                # Calculate threshold at quantile q
+                threshold = genpareto.ppf(q, c, loc, scale)
+                
+                # Shift back to original scale if needed
+                if data_min <= 0:
+                    threshold = threshold + data_min - 1e-8
+                
+                thresholds.append(threshold)
+                
+            except Exception as e:
+                # Fallback to percentile if EVT fitting fails
+                print(f"EVT fitting failed for component {j}, using percentile fallback: {e}")
+                threshold = np.percentile(data, q * 100)
+                thresholds.append(threshold)
+        
+        return torch.tensor(thresholds, device=residuals.device)
+
     def evaluate(self, dataloader=None, eval_mode="Test"):
         """
         Evaluates the model on a dataset using the configured method.
@@ -383,8 +523,16 @@ class AnomalyTrainer:
                             batch_level_preds['level_1'].append(is_anomalous)  # Same for temporal mode
                             batch_level_preds['level_2'].append(is_anomalous)
                         else: # Simple threshold
-                            error = torch.mean(residuals_0[i])
-                            raw_anomaly = (error > self.anomaly_threshold_0).item()
+                            if self.threshold_method == "evt":
+                                # Per-component EVT thresholding for temporal mode
+                                component_errors = torch.mean(residuals_0[i], dim=1)  # [n_components]
+                                component_anomalies = component_errors > self.evt_thresholds_0
+                                raw_anomaly = torch.any(component_anomalies).item()
+                            else:
+                                # Original single threshold
+                                error = torch.mean(residuals_0[i])
+                                raw_anomaly = (error > self.anomaly_threshold_0).item()
+                            
                             # Store raw prediction
                             batch_preds_raw.append(raw_anomaly)
                             # Apply temporal consistency for filtered prediction
@@ -447,19 +595,39 @@ class AnomalyTrainer:
                             batch_level_preds['level_1'].append(is_anomalous)  # Same for CUSUM
                             batch_level_preds['level_2'].append(is_anomalous)
                         else: # Multi-level threshold evaluation
-                            error_0 = torch.mean(residuals_0[i])
-                            error_1 = torch.mean(residuals_1[i])
-                            error_2 = torch.mean(residuals_2[i])
-                            
-                            is_anomalous_0 = (error_0 > self.anomaly_threshold_0).item()
-                            is_anomalous_1 = (error_1 > self.anomaly_threshold_1).item()
-                            
-                            if self.use_two_threshold_alarm:
-                                is_high_plc_alarm = (error_2 > self.anomaly_threshold_2_high).item()
-                                is_low_plc_alarm = (error_2 > self.anomaly_threshold_2_low).item()
-                                is_anomalous_2 = is_high_plc_alarm or (is_low_plc_alarm and (is_anomalous_0 or is_anomalous_1))
+                            if self.threshold_method == "evt":
+                                # Per-component EVT thresholding for each level
+                                
+                                # Level 0: Per-component errors
+                                component_errors_0 = torch.mean(residuals_0[i], dim=1)  # [n_components]
+                                component_anomalies_0 = component_errors_0 > self.evt_thresholds_0
+                                is_anomalous_0 = torch.any(component_anomalies_0).item()
+                                
+                                # Level 1: Per-edge errors  
+                                edge_errors_1 = torch.mean(residuals_1[i], dim=1)  # [n_edges]
+                                edge_anomalies_1 = edge_errors_1 > self.evt_thresholds_1
+                                is_anomalous_1 = torch.any(edge_anomalies_1).item()
+                                
+                                # Level 2: Per-PLC errors
+                                plc_errors_2 = torch.mean(residuals_2[i], dim=1)  # [n_plcs]
+                                plc_anomalies_2 = plc_errors_2 > self.evt_thresholds_2
+                                is_anomalous_2 = torch.any(plc_anomalies_2).item()
+                                
                             else:
-                                is_anomalous_2 = (error_2 > self.anomaly_threshold_2).item()
+                                # Original single threshold per level
+                                error_0 = torch.mean(residuals_0[i])
+                                error_1 = torch.mean(residuals_1[i])
+                                error_2 = torch.mean(residuals_2[i])
+                                
+                                is_anomalous_0 = (error_0 > self.anomaly_threshold_0).item()
+                                is_anomalous_1 = (error_1 > self.anomaly_threshold_1).item()
+                                
+                                if self.use_two_threshold_alarm:
+                                    is_high_plc_alarm = (error_2 > self.anomaly_threshold_2_high).item()
+                                    is_low_plc_alarm = (error_2 > self.anomaly_threshold_2_low).item()
+                                    is_anomalous_2 = is_high_plc_alarm or (is_low_plc_alarm and (is_anomalous_0 or is_anomalous_1))
+                                else:
+                                    is_anomalous_2 = (error_2 > self.anomaly_threshold_2).item()
 
                             batch_level_preds['level_0'].append(is_anomalous_0)
                             batch_level_preds['level_1'].append(is_anomalous_1)

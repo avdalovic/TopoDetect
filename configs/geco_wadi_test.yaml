@@ -46,10 +46,10 @@ model:
 
 # Training configuration
 training:
-  epochs: 1
+  epochs: 5
   batch_size: 1
   learning_rate: 0.001
-  weight_decay: 0.00001
+  weight_decay: 0.0001
   grad_clip_value: 1.0
   test_interval: 1  # Changed from 5 to 1 to evaluate after each epoch
   early_stopping:
