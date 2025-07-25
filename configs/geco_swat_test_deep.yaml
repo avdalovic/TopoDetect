@@ -1,12 +1,14 @@
-# GECO SWAT Test Configuration with EVT Thresholding
-# Testing GECO-learned relationships with per-component EVT thresholds
+# GECO SWAT Test Configuration - DEEP MODEL
+# Testing deeper architecture for better residual quality
+# Encoder: [[1,3,4], [64,64,64], [128,128,128], [256,256,256]]
+# Decoders: 3-layer with 2x hidden capacity
 
 # Reproducibility
 seed: 42
 
 project_name: "esorics_geco_test"
 entity: "avdalovica"
-experiment_name: "geco_swat_test_evt_01"
+experiment_name: "geco_swat_test_deep_01"
 dataset_name: "SWAT"
 
 # System configuration
@@ -19,8 +21,8 @@ data:
   data_dir: "data/SWAT"
   train_path: "SWATv0_train.csv"
   test_path: "SWATv0_test.csv"
-  sample_rate: 0.1 # Small sample for testing
-  validation_split_ratio: 0.3
+  sample_rate: 0.01 # Small sample for testing deep model
+  validation_split_ratio: 0.2
   temporal_mode: false
   temporal_sample_rate: 1
   normalization_method: "mixed_normalization"  # Use mixed normalization (z-score for sensors, min-max for actuators)
@@ -31,11 +33,11 @@ topology:
   use_geco_relationships: true    # Use GECO-learned relationships
   use_geco_features: true         # Use enhanced edge features with GECO info
 
-# Model configuration
+# Model configuration - DEEP ARCHITECTURE
 model:
   name: "AnomalyCCANN"
   channels_per_layer:
-    - [[1, 3, 4], [32, 32, 32], [64, 64, 64]]  # Updated for simplified features (1D, 3D, 4D)
+    - [[1, 3, 4], [128, 128, 128], [256, 256, 256]]  # DEEP: 3 layers with much wider channels (128->256 instead of 32->64)
   original_feature_dims:
     "0": 1  # 0-cells: 1D features (mixed normalization)
     "1": 3  # 1-cells: 3D features (2D concatenated + 1D GECO normalized strength)
@@ -49,7 +51,7 @@ training:
   epochs: 1
   batch_size: 1
   learning_rate: 0.001
-  weight_decay: 0.00001
+  weight_decay: 0.0001
   grad_clip_value: 1.0
   test_interval: 1  # Changed from 5 to 1 to evaluate after each epoch
   early_stopping:
@@ -57,11 +59,11 @@ training:
     patience: 10
     min_delta: 0.001
 
-# Anomaly detection configuration
+# Anomaly detection configuration - STANDARD THRESHOLDING
 anomaly_detection:
   temporal_consistency: 3
-  threshold_method: "evt"  # NEW: Use EVT thresholding instead of percentile
-  threshold_percentile: 99.0  # Fallback for components where EVT fails
+  threshold_method: "percentile"  # Use standard percentile thresholding (not EVT)
+  threshold_percentile: 99.0
   sd_multiplier: 2.5
   use_component_thresholds: false
 
