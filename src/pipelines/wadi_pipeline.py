@@ -211,6 +211,15 @@ def load_wadi_data(train_path, test_path, sample_rate=1.0, save_test_path=None, 
     attack_test = (test_data['Attack'] == 1).sum()
     print(f"Test data contains {normal_test} normal samples and {attack_test} attack samples")
     print(f"Attack percentage: {attack_test/len(test_data)*100:.2f}%")
+    
+    # Additional debug info for WADI
+    print(f"DEBUG: WADI test data analysis:")
+    print(f"  Sample rate used: {sample_rate}")
+    print(f"  Total test samples: {len(test_data)}")
+    print(f"  Attack samples: {attack_test}")
+    if attack_test == 0:
+        print(f"  WARNING: No attack samples in test data! This will cause evaluation to fail.")
+        print(f"  Consider increasing sample_rate or using attack_focused_sampling=True")
 
     # Save test data if path provided
     if save_test_path:
@@ -332,15 +341,35 @@ def run_experiment(config):
     
     # Create datasets
     print("Creating datasets (train, validation, test) in reconstruction mode...")
-    print(f"Feature engineering config: normalization={config['data']['normalization_method']}, enhanced_2cell={config['data']['use_enhanced_2cell_features']}")
+    
+    # Get new feature engineering parameters
+    normalization_method = config.get('data', {}).get('normalization_method', 'standard')
+    use_enhanced_2cell_features = config.get('data', {}).get('use_enhanced_2cell_features', False)
+    use_first_order_differences = config.get('data', {}).get('use_first_order_differences', False)
+    use_first_order_differences_edges = config.get('data', {}).get('use_first_order_differences_edges', True)
+    use_pressure_differential_features = config.get('data', {}).get('use_pressure_differential_features', False)
+    
+    print(f"Feature engineering config:")
+    print(f"  normalization={normalization_method}")
+    print(f"  enhanced_2cell={use_enhanced_2cell_features}")
+    print(f"  first_order_diff_nodes={use_first_order_differences}")
+    print(f"  first_order_diff_edges={use_first_order_differences_edges}")
+    print(f"  pressure_differential_features={use_pressure_differential_features} (DEPRECATED - causes loss instability)")
+    
+    # Check if GECO features should be used
+    use_geco_features = config.get('topology', {}).get('use_geco_features', False)
     
     train_dataset = WADIDataset(
         data=train_data,
         wadi_complex=wadi_complex,
         temporal_mode=config['data']['temporal_mode'],
         temporal_sample_rate=config['data']['temporal_sample_rate'],
-        normalization_method=config['data']['normalization_method'],
-        use_enhanced_2cell_features=config['data']['use_enhanced_2cell_features'],
+        use_geco_features=use_geco_features,
+        normalization_method=normalization_method,
+        use_enhanced_2cell_features=use_enhanced_2cell_features,
+        use_first_order_differences=use_first_order_differences,
+        use_first_order_differences_edges=use_first_order_differences_edges,
+        use_pressure_differential_features=use_pressure_differential_features,
         seed=config.get('seed', 42)
     )
     
@@ -353,20 +382,30 @@ def run_experiment(config):
         wadi_complex=wadi_complex,
         temporal_mode=config['data']['temporal_mode'],
         temporal_sample_rate=config['data']['temporal_sample_rate'],
-        normalization_method=config['data']['normalization_method'],
-        use_enhanced_2cell_features=config['data']['use_enhanced_2cell_features'],
+        use_geco_features=use_geco_features,
+        normalization_method=normalization_method,
+        use_enhanced_2cell_features=use_enhanced_2cell_features,
+        use_first_order_differences=use_first_order_differences,
+        use_first_order_differences_edges=use_first_order_differences_edges,
+        use_pressure_differential_features=use_pressure_differential_features,
         seed=config.get('seed', 42)
-    )
-    # Ensure validation dataset matches training feature count
-    validation_dataset.expected_feature_count = expected_feature_count
+    ) if not validation_data.empty else None
+    
+    # Ensure validation dataset matches training feature count (only if dataset exists)
+    if validation_dataset is not None:
+        validation_dataset.expected_feature_count = expected_feature_count
     
     test_dataset = WADIDataset(
         data=test_data,
         wadi_complex=wadi_complex,
         temporal_mode=config['data']['temporal_mode'],
         temporal_sample_rate=config['data']['temporal_sample_rate'],
-        normalization_method=config['data']['normalization_method'],
-        use_enhanced_2cell_features=config['data']['use_enhanced_2cell_features'],
+        use_geco_features=use_geco_features,
+        normalization_method=normalization_method,
+        use_enhanced_2cell_features=use_enhanced_2cell_features,
+        use_first_order_differences=use_first_order_differences,
+        use_first_order_differences_edges=use_first_order_differences_edges,
+        use_pressure_differential_features=use_pressure_differential_features,
         seed=config.get('seed', 42)
     )
     # Ensure test dataset matches training feature count
@@ -377,8 +416,9 @@ def run_experiment(config):
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=False) # Turn off pin_memory
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    if validation_dataset:
+    if validation_dataset is not None:
         validation_dataloader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False)
+        print(f"Created validation dataloader with {len(validation_dataset)} samples")
     else:
         validation_dataloader = None
         print("Warning: No validation data available. Threshold will be calibrated on training data.")
@@ -386,9 +426,10 @@ def run_experiment(config):
             print("Switching to 'train' thresholding method.")
             config['anomaly_detection']['threshold_method'] = 'train'
 
-    if validation_dataloader is None:
-         print("Error: Validation dataloader could not be created. Check validation_split_ratio.")
-         return
+    # Remove this check since we can proceed without validation data
+    # if validation_dataloader is None:
+    #      print("Error: Validation dataloader could not be created. Check validation_split_ratio.")
+    #      return
 
     # Create model
     print(f"Creating model in {'temporal' if config['data']['temporal_mode'] else 'reconstruction'} mode...")

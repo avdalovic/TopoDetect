@@ -1,0 +1,99 @@
+# GECO WADI Physics-Based Experiment Configuration
+# Small experiment testing zone physics features for water distribution system anomaly detection
+
+# Reproducibility
+seed: 42
+
+# Wandb configuration
+project_name: "esorics_geco_wadi_physics"
+entity: "avdalovica"
+experiment_name: "wadi_zone_physics_small_test"
+dataset_name: "WADI"
+
+# System configuration
+system:
+  device: "cuda"
+  checkpoint_dir: "checkpoints"
+
+# Data configuration
+data:
+  data_dir: "data/WADI"
+  train_path: "WADI_train.csv"
+  test_path: "WADI_test.csv"
+  sample_rate: 0.05  # 5% of data for better attack coverage (was 0.01 - too low)
+  validation_split_ratio: 0.2
+  temporal_mode: false
+  temporal_sample_rate: 1
+  normalization_method: "mixed_normalization"  # Z-score for sensors, min-max for actuators
+  use_enhanced_2cell_features: true  # Enhanced 4D features (mean/std sensors, median/range actuators)
+  use_first_order_differences: true  # Enable first-order differences for 0-cells (nodes) ONLY
+  use_first_order_differences_edges: false  # Disable first-order differences for 1-cells (edges)
+  use_pressure_differential_features: false  # DISABLED: Physics features were causing loss to blow up
+
+# Topology configuration
+topology:
+  use_geco_relationships: true    # Use GECO-learned relationships for enhanced topology
+  use_geco_features: true         # Use enhanced edge features with GECO strength
+
+# Model configuration
+model:
+  name: "AnomalyCCANN"
+  channels_per_layer:
+    - [[2, 3, 4], [32, 32, 32], [64, 64, 64]]  # Input: [2D 0-cells, 3D 1-cells, 4D 2-cells]
+  original_feature_dims:
+    "0": 2  # 0-cells: normalized value + first-order difference
+    "1": 3  # 1-cells: two concatenated values + GECO strength (NO differences)
+    "2": 4  # 2-cells: enhanced 4D features (sensor/actuator statistics)
+  temporal_mode: false
+  use_tcn: false
+  n_input: 10
+
+# Training configuration
+training:
+  epochs: 1  # Reasonable for evaluation while keeping training time manageable
+  batch_size: 1  # Small batch size for stability
+  learning_rate: 0.0001  # Reduced from 0.001 due to larger scale (119 components)
+  weight_decay: 0.00001
+  grad_clip_value: 1.0
+  test_interval: 2  # Test every 2 epochs
+  early_stopping:
+    enabled: true
+    patience: 5  # Stop if no improvement for 5 epochs
+    min_delta: 0.001
+  lr_scheduler:
+    enabled: true
+    patience: 3
+    factor: 0.5
+    min_lr: 0.00001
+
+# Optimizer configuration
+optimizer:
+  type: "Adam"
+  betas: [0.9, 0.999]
+  eps: 1e-08
+
+# Anomaly detection configuration
+anomaly_detection:
+  temporal_consistency: 2  # Require 3 consecutive anomalies to reduce false positives
+  threshold_method: "percentile"
+  threshold_percentile: 99.0  # Use 99th percentile as threshold
+  sd_multiplier: 2.5
+  use_component_thresholds: false
+
+# Evaluation configuration
+evaluation:
+  method: "threshold"
+  fp_alarm_window_seconds: 60  # 1-minute false positive suppression window
+
+# Enhanced time-aware metrics for EOHL analysis
+enhanced_time_aware_metrics:
+  theta_p: 0.5    # Precision weight
+  theta_r: 0.01   # Recall weight  
+  original_sample_hz: 1  # 1 Hz sampling rate
+
+# Logging configuration
+logging:
+  log_level: "INFO"
+  save_model: true
+  save_residuals: true
+  log_interval: 50  # Log every 50 batches 

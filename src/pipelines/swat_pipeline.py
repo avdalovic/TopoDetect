@@ -375,8 +375,16 @@ def run_experiment(config):
     # Get new feature engineering parameters
     normalization_method = config.get('data', {}).get('normalization_method', 'standard')
     use_enhanced_2cell_features = config.get('data', {}).get('use_enhanced_2cell_features', False)
+    use_first_order_differences = config.get('data', {}).get('use_first_order_differences', False)
+    use_first_order_differences_edges = config.get('data', {}).get('use_first_order_differences_edges', True)
+    use_flow_balance_features = config.get('data', {}).get('use_flow_balance_features', False)
     
-    print(f"Feature engineering config: normalization={normalization_method}, enhanced_2cell={use_enhanced_2cell_features}")
+    print(f"Feature engineering config:")
+    print(f"  normalization={normalization_method}")
+    print(f"  enhanced_2cell={use_enhanced_2cell_features}")
+    print(f"  first_order_diff_nodes={use_first_order_differences}")
+    print(f"  first_order_diff_edges={use_first_order_differences_edges}")
+    print(f"  flow_balance_features={use_flow_balance_features}")
     
     if temporal_mode:
         dataset_args = {
@@ -386,6 +394,9 @@ def run_experiment(config):
             'use_geco_features': use_geco_features,
             'normalization_method': normalization_method,
             'use_enhanced_2cell_features': use_enhanced_2cell_features,
+            'use_first_order_differences': use_first_order_differences,
+            'use_first_order_differences_edges': use_first_order_differences_edges,
+            'use_flow_balance_features': use_flow_balance_features,
             'seed': seed
         }
     else:
@@ -394,6 +405,9 @@ def run_experiment(config):
             'use_geco_features': use_geco_features,
             'normalization_method': normalization_method,
             'use_enhanced_2cell_features': use_enhanced_2cell_features,
+            'use_first_order_differences': use_first_order_differences,
+            'use_first_order_differences_edges': use_first_order_differences_edges,
+            'use_flow_balance_features': use_flow_balance_features,
             'seed': seed
         }
 

@@ -10,7 +10,8 @@ from src.utils.attack_utils import is_actuator
 class SWaTDataset(Dataset):
     """Dataset class for SWAT anomaly detection."""
     def __init__(self, data, swat_complex, feature_dim_0=3, n_input=10, temporal_mode=False, temporal_sample_rate=1, use_geco_features=False, 
-                 normalization_method="standard", use_enhanced_2cell_features=False, seed=None):
+                 normalization_method="standard", use_enhanced_2cell_features=False, use_first_order_differences=False, 
+                 use_first_order_differences_edges=True, use_flow_balance_features=False, seed=None):
         """
         Initialize the SWAT dataset for anomaly detection.
 
@@ -34,6 +35,12 @@ class SWaTDataset(Dataset):
             Normalization method: "standard" (current), "z_normalization", "mixed_normalization"
         use_enhanced_2cell_features : bool, default=False
             Whether to use enhanced 2-cell features (4D: mean_sensors, sd_sensors, median_actuators, iqr_actuators)
+        use_first_order_differences : bool, default=False
+            Whether to include first-order differences (lag-1) as additional features for 0-cells
+        use_first_order_differences_edges : bool, default=True
+            Whether to include first-order differences for 1-cells (edges) - separate control
+        use_flow_balance_features : bool, default=False
+            Whether to add flow balance features to PLCs (FIT{X}01 - FIT{X+1}01)
         seed : int, optional
             Random seed for reproducibility
         """
@@ -47,6 +54,9 @@ class SWaTDataset(Dataset):
         self.use_geco_features = use_geco_features
         self.normalization_method = normalization_method
         self.use_enhanced_2cell_features = use_enhanced_2cell_features
+        self.use_first_order_differences = use_first_order_differences
+        self.use_first_order_differences_edges = use_first_order_differences_edges
+        self.use_flow_balance_features = use_flow_balance_features
         self.seed = seed
         
         # Set seed if provided
@@ -56,38 +66,59 @@ class SWaTDataset(Dataset):
         
         print(f"Using normalization method: {normalization_method}")
         print(f"Using enhanced 2-cell features: {use_enhanced_2cell_features}")
+        print(f"Using first-order differences (0-cells): {use_first_order_differences}")
+        print(f"Using first-order differences (1-cells): {use_first_order_differences_edges}")
+        print(f"Using flow balance features (PLCs): {use_flow_balance_features}")
         if seed is not None:
             print(f"Using seed: {seed}")
         
         # Set feature dimensions based on configuration
-        # Determine actual 0-cell feature dimension based on normalization method
+        # Determine actual 0-cell feature dimension based on normalization method and first-order differences
         if normalization_method == "standard":
-            actual_feature_dim_0 = 3  # Original 3D features
+            base_feature_dim_0 = 3  # Original 3D features
         else:
-            actual_feature_dim_0 = 1  # New methods use 1D features
+            base_feature_dim_0 = 1  # New methods use 1D features
             
+        # Add first-order differences dimension if enabled for 0-cells
+        if self.use_first_order_differences:
+            actual_feature_dim_0 = base_feature_dim_0 + 1  # Add 1D for first-order difference
+            print(f"0-cell feature dimension increased from {base_feature_dim_0}D to {actual_feature_dim_0}D (added first-order differences)")
+        else:
+            actual_feature_dim_0 = base_feature_dim_0
+            
+        # Calculate 1-cell feature dimensions
+        # For edges, we only use the FIRST dimension of 0-cells (normalized values, not differences)
         if self.use_geco_features:
             if actual_feature_dim_0 == 3:  # Original implementation
-                self.feature_dim_1 = actual_feature_dim_0 * 2 + 1  # 2d + 1D GECO = 7D
-            else:  # New implementation with 1D 0-cells
-                self.feature_dim_1 = 2 + 1  # 2D concatenated + 1D GECO = 3D
-            print(f"Using simplified GECO edge features: {self.feature_dim_1}D")
+                base_1cell_dim = actual_feature_dim_0 * 2 + 1  # 2d + 1D GECO = 7D
+            else:  # New implementation with 1D or 2D 0-cells
+                # We only use the first dimension (normalized values) from each 0-cell for edges
+                base_1cell_dim = 1 * 2 + 1  # 2 * 1D values + 1D GECO = 3D
         else:
             if actual_feature_dim_0 == 3:  # Original implementation
-                self.feature_dim_1 = actual_feature_dim_0 * 2  # 6D concatenated features
-            else:  # New implementation with 1D 0-cells
-                self.feature_dim_1 = 2  # 2D concatenated features
-            print(f"Using standard edge features: {self.feature_dim_1}D")
+                base_1cell_dim = actual_feature_dim_0 * 2  # 6D concatenated features
+            else:  # New implementation with 1D or 2D 0-cells
+                # We only use the first dimension (normalized values) from each 0-cell for edges
+                base_1cell_dim = 1 * 2  # 2 * 1D values = 2D
+        
+        # Add first-order differences for 1-cells if enabled
+        if self.use_first_order_differences_edges:
+            self.feature_dim_1 = base_1cell_dim + 1  # Add 1D for edge first-order differences
+            print(f"Using 1-cell features with differences: {self.feature_dim_1}D")
+        else:
+            self.feature_dim_1 = base_1cell_dim
+            print(f"Using 1-cell features without differences: {self.feature_dim_1}D")
         
         # Override the feature_dim_0 for consistency
         self.feature_dim_0 = actual_feature_dim_0
         
         # Set 2-cell feature dimensions
-        if use_enhanced_2cell_features:
-            self.feature_dim_2 = 4  # 4D: mean/std for sensors, median/range for actuators
-            print(f"Using simplified 2-cell features: {self.feature_dim_2}D")
+        base_2cell_dim = 4 if use_enhanced_2cell_features else 1
+        if use_flow_balance_features:
+            self.feature_dim_2 = base_2cell_dim + 1  # Add 1D for flow balance
+            print(f"Using 2-cell features with flow balance: {self.feature_dim_2}D")
         else:
-            self.feature_dim_2 = 1  # 1D for new methods without enhancement
+            self.feature_dim_2 = base_2cell_dim
             print(f"Using standard 2-cell features: {self.feature_dim_2}D")
         
         # Process data and create features
@@ -129,7 +160,12 @@ class SWaTDataset(Dataset):
     def compute_initial_x0(self):
         """
         Preprocess raw features to create feature vectors based on normalization method.
+        Includes first-order differences if enabled.
         """
+        print(f"Computing 0-cell features with normalization method: {self.normalization_method}")
+        if self.use_first_order_differences:
+            print("Including first-order differences (lag-1) in features")
+        
         if self.normalization_method == "standard":
             return self._compute_standard_x0()
         elif self.normalization_method == "z_normalization":
@@ -197,15 +233,18 @@ class SWaTDataset(Dataset):
 
     def _compute_mixed_normalized_x0(self):
         """
-        New method: Z-normalization for sensors, min-max normalization for actuators, 1D features.
+        New method: Z-normalization for sensors, min-max normalization for actuators.
+        Optionally includes first-order differences (lag-1) as additional features.
         """
         num_samples = len(self.data)
         num_components = len(self.columns)
-
-        # Initialize tensor for 0-cell features (1D)
-        features = torch.zeros((num_samples, num_components, 1))
-
+        
         print("Preprocessing features using mixed normalization (z-norm for sensors, min-max for actuators)...")
+        if self.use_first_order_differences:
+            print("Computing first-order differences (current_value - previous_value)")
+
+        # Initialize tensor for 0-cell features (1D or 2D based on first-order differences)
+        features = torch.zeros((num_samples, num_components, self.feature_dim_0))
         
         for i, col in enumerate(self.columns):
             values = self.data[col].values
@@ -224,9 +263,27 @@ class SWaTDataset(Dataset):
                 else:
                     # Min-max normalize: (x - min) / (max - min)
                     normalized_values = (values - min_val) / range_val
-                    print(f"  {col} (actuator): min={min_val:.4f}, max={max_val:.4f}, range={range_val:.4f}")
+                    if i < 3:  # Only print details for first few components
+                        print(f"  {col} (actuator): min={min_val:.4f}, max={max_val:.4f}, range={range_val:.4f}")
                 
+                # Store normalized values in first dimension
                 features[:, i, 0] = torch.tensor(normalized_values, dtype=torch.float)
+                
+                # Compute first-order differences if enabled
+                if self.use_first_order_differences:
+                    # Calculate lag-1 differences: current - previous
+                    first_order_diffs = np.zeros_like(normalized_values)
+                    first_order_diffs[1:] = normalized_values[1:] - normalized_values[:-1]
+                    # First sample (index 0) has no previous sample, so difference = 0
+                    first_order_diffs[0] = 0.0
+                    
+                    # Store first-order differences in second dimension
+                    features[:, i, 1] = torch.tensor(first_order_diffs, dtype=torch.float)
+                    
+                    if i < 3:  # Debug info for first few components
+                        diff_mean = np.mean(np.abs(first_order_diffs[1:]))  # Exclude first sample for mean
+                        diff_max = np.max(np.abs(first_order_diffs))
+                        print(f"    First-order diff: mean_abs={diff_mean:.6f}, max_abs={diff_max:.6f}")
                 
             else:
                 # For sensors: z-normalization
@@ -237,22 +294,46 @@ class SWaTDataset(Dataset):
                 normalized_values = (values - mean_val) / std_val
                 features[:, i, 0] = torch.tensor(normalized_values, dtype=torch.float)
                 
-                print(f"  {col} (sensor): mean={mean_val:.4f}, std={std_val:.4f}")
-        
+                if i < 3:  # Only print details for first few components
+                    print(f"  {col} (sensor): mean={mean_val:.4f}, std={std_val:.4f}")
+                
+                # Compute first-order differences if enabled
+                if self.use_first_order_differences:
+                    # Calculate lag-1 differences: current - previous
+                    first_order_diffs = np.zeros_like(normalized_values)
+                    first_order_diffs[1:] = normalized_values[1:] - normalized_values[:-1]
+                    # First sample (index 0) has no previous sample, so difference = 0
+                    first_order_diffs[0] = 0.0
+                    
+                    # Store first-order differences in second dimension
+                    features[:, i, 1] = torch.tensor(first_order_diffs, dtype=torch.float)
+                    
+                    if i < 3:  # Debug info for first few components
+                        diff_mean = np.mean(np.abs(first_order_diffs[1:]))  # Exclude first sample for mean
+                        diff_max = np.max(np.abs(first_order_diffs))
+                        print(f"    First-order diff: mean_abs={diff_mean:.6f}, max_abs={diff_max:.6f}")
+                        
         print(f"Computed 0-cell features shape: {features.shape}")
+        if self.use_first_order_differences:
+            print(f"  Dimension 0: Normalized values")
+            print(f"  Dimension 1: First-order differences (lag-1)")
+        
         return features
 
     def _compute_z_normalized_x0(self):
         """
-        New method: Z-normalization for both sensors and actuators, 1D features.
+        New method: Z-normalization for both sensors and actuators.
+        Optionally includes first-order differences (lag-1) as additional features.
         """
         num_samples = len(self.data)
         num_components = len(self.columns)
 
-        # Initialize tensor for 0-cell features (1D)
-        features = torch.zeros((num_samples, num_components, 1))
-
         print("Preprocessing features using z-normalization for both sensors and actuators...")
+        if self.use_first_order_differences:
+            print("Computing first-order differences (current_value - previous_value)")
+
+        # Initialize tensor for 0-cell features (1D or 2D based on first-order differences)
+        features = torch.zeros((num_samples, num_components, self.feature_dim_0))
         
         for i, col in enumerate(self.columns):
             values = self.data[col].values
@@ -269,8 +350,28 @@ class SWaTDataset(Dataset):
                 print(f"  {col}: mean={mean_val:.4f}, std={std_val:.4f}")
             elif i == 5:
                 print(f"  ... (suppressing further normalization details)")
+            
+            # Compute first-order differences if enabled
+            if self.use_first_order_differences:
+                # Calculate lag-1 differences: current - previous
+                first_order_diffs = np.zeros_like(normalized_values)
+                first_order_diffs[1:] = normalized_values[1:] - normalized_values[:-1]
+                # First sample (index 0) has no previous sample, so difference = 0
+                first_order_diffs[0] = 0.0
+                
+                # Store first-order differences in second dimension
+                features[:, i, 1] = torch.tensor(first_order_diffs, dtype=torch.float)
+                
+                if i < 3:  # Debug info for first few components
+                    diff_mean = np.mean(np.abs(first_order_diffs[1:]))  # Exclude first sample for mean
+                    diff_max = np.max(np.abs(first_order_diffs))
+                    print(f"    First-order diff: mean_abs={diff_mean:.6f}, max_abs={diff_max:.6f}")
         
         print(f"Computed 0-cell features shape: {features.shape}")
+        if self.use_first_order_differences:
+            print(f"  Dimension 0: Z-normalized values")
+            print(f"  Dimension 1: First-order differences (lag-1)")
+            
         return features
 
     def _compute_median_subtraction_x0(self):
@@ -399,12 +500,17 @@ class SWaTDataset(Dataset):
 
     def _compute_new_x1(self):
         """
-        New implementation for 1-cell features with 1D 0-cells.
+        New implementation for 1-cell features with 1D or 2D 0-cells.
+        Handles concatenation of 0-cell features regardless of their dimensionality.
+        Optionally adds first-order differences for edges if enabled.
         """
         if self.use_geco_features:
             print("Computing initial 1-cell features (concatenation + GECO method)...")
         else:
             print("Computing initial 1-cell features (concatenation method)...")
+            
+        if not self.use_first_order_differences_edges:
+            print("  First-order differences DISABLED for 1-cells (edges)")
             
         num_samples = len(self.data)
 
@@ -435,6 +541,10 @@ class SWaTDataset(Dataset):
         # Create tensor for 1-cell features
         x_1 = torch.zeros((num_samples, num_1_cells, self.feature_dim_1))
 
+        # Store edge features for first-order differences computation if needed
+        if self.use_first_order_differences_edges:
+            edge_base_features = torch.zeros((num_samples, num_1_cells, self.feature_dim_1 - 1))
+
         # For each valid 1-cell (edge), concatenate the features of its boundary 0-cells
         for new_cell_idx, cell in enumerate(valid_cells_1):
             boundary_nodes = list(cell)
@@ -449,10 +559,22 @@ class SWaTDataset(Dataset):
 
             # Concatenate the features of the boundary nodes
             for sample_idx in range(num_samples):
-                # Concatenate features of connected 0-cells (2D: 1D + 1D)
-                node1_feat = self.x_0[sample_idx, node_indices[0]]  # 1D
-                node2_feat = self.x_0[sample_idx, node_indices[1]]  # 1D
-                edge_feat = torch.cat([node1_feat, node2_feat], dim=0)  # 2D concatenated feature
+                # Concatenate features of connected 0-cells
+                # Handle both 1D and 2D 0-cell features automatically
+                node1_feat = self.x_0[sample_idx, node_indices[0]]  # Could be 1D or 2D
+                node2_feat = self.x_0[sample_idx, node_indices[1]]  # Could be 1D or 2D
+                
+                # For edge features, only use the FIRST dimension (original value, not first-order differences)
+                if self.use_first_order_differences:
+                    # Extract only the normalized values (dimension 0), not the differences (dimension 1)
+                    node1_value = node1_feat[0:1]  # Keep as 1D tensor
+                    node2_value = node2_feat[0:1]  # Keep as 1D tensor
+                else:
+                    # Use the full feature (should be 1D anyway)
+                    node1_value = node1_feat
+                    node2_value = node2_feat
+                
+                edge_feat = torch.cat([node1_value, node2_value], dim=0)  # Concatenated feature
                 
                 # Add GECO features if enabled
                 if self.use_geco_features:
@@ -466,11 +588,36 @@ class SWaTDataset(Dataset):
                         geco_feat = torch.tensor([0.0], dtype=torch.float32)  # Zero strength for non-GECO
                     
                     # Concatenate original features with simplified GECO features
-                    edge_feat = torch.cat([edge_feat, geco_feat], dim=0)  # 3D total feature (2D + 1D GECO)
+                    edge_feat = torch.cat([edge_feat, geco_feat], dim=0)  # Total feature with GECO
                 
-                x_1[sample_idx, new_cell_idx] = edge_feat
+                # Store base features if we need to compute first-order differences
+                if self.use_first_order_differences_edges:
+                    edge_base_features[sample_idx, new_cell_idx] = edge_feat
+                    
+                    # Compute first-order differences for edges
+                    if sample_idx == 0:
+                        # First sample has no previous sample, so difference = 0
+                        edge_diff = torch.zeros(1, dtype=torch.float32)
+                    else:
+                        # Compute difference from previous sample
+                        prev_feat = edge_base_features[sample_idx - 1, new_cell_idx]
+                        edge_diff = torch.mean(edge_feat - prev_feat).unsqueeze(0)  # Average difference as 1D
+                    
+                    # Concatenate base features with difference
+                    final_edge_feat = torch.cat([edge_feat, edge_diff], dim=0)
+                else:
+                    # No differences for edges
+                    final_edge_feat = edge_feat
+                
+                x_1[sample_idx, new_cell_idx] = final_edge_feat
 
         print(f"Computed 1-cell features shape: {x_1.shape}")
+        if self.use_first_order_differences:
+            print(f"  Each 1-cell uses only VALUES (not differences) from {self.feature_dim_0}D 0-cell features" + 
+                  (f" + 1D GECO" if self.use_geco_features else ""))
+        if self.use_first_order_differences_edges:
+            print(f"  + 1D first-order differences for edges")
+        
         return x_1
 
     def compute_initial_x2(self, node_index_map):
@@ -615,8 +762,12 @@ class SWaTDataset(Dataset):
         """
         Compute enhanced 2-cell features with 4D vectors:
         [sensor_mean, sensor_std, actuator_median, actuator_range]
+        Optionally adds flow balance features (FIT{X}01 - FIT{X+1}01) if enabled.
         """
-        print("Computing simplified 2-cell features (4D: mean/std for sensors, median/range for actuators)...")
+        print("Computing enhanced 2-cell features (4D: mean/std for sensors, median/range for actuators)")
+        if self.use_flow_balance_features:
+            print("  + Flow balance features (FIT{X}01 - FIT{X+1}01) for process physics")
+            
         num_samples = len(self.data)
         
         _, col_dict_12, _ = self.complex.incidence_matrix(1, 2, index=True)
@@ -627,6 +778,26 @@ class SWaTDataset(Dataset):
             return torch.zeros((num_samples, 1, self.feature_dim_2))
         
         x_2 = torch.zeros((num_samples, num_2_cells, self.feature_dim_2))
+        
+        # Define SWAT flow meters for each stage (for flow balance computation)
+        flow_sensors = {
+            0: ('FIT101', 'FIT201'),  # Stage 1: FIT101 - FIT201
+            1: ('FIT201', 'FIT301'),  # Stage 2: FIT201 - FIT301
+            2: ('FIT301', 'FIT401'),  # Stage 3: FIT301 - FIT401
+            3: ('FIT401', 'FIT501'),  # Stage 4: FIT401 - FIT501
+            4: ('FIT501', 'FIT601'),  # Stage 5: FIT501 - FIT601
+        }
+        
+        # Get flow sensor indices if they exist in our data
+        flow_indices = {}
+        for stage, (inflow, outflow) in flow_sensors.items():
+            if inflow in self.columns and outflow in self.columns:
+                inflow_idx = self.columns.index(inflow)
+                outflow_idx = self.columns.index(outflow)
+                flow_indices[stage] = (inflow_idx, outflow_idx)
+                print(f"  Flow balance Stage {stage+1}: {inflow} - {outflow}")
+            else:
+                print(f"  Warning: Flow sensors for Stage {stage+1} not found: {inflow}, {outflow}")
         
         cell_to_nodes = {}
         for cell_idx, cell in enumerate(cells_2):
@@ -641,28 +812,71 @@ class SWaTDataset(Dataset):
             cell_to_nodes[cell_idx] = (sensor_indices, actuator_indices)
 
         for sample_idx in range(num_samples):
-            sample_x0 = self.x_0[sample_idx, :, 0]
+            sample_x0 = self.x_0[sample_idx, :, 0]  # Use only the first dimension (normalized values)
             
             for cell_idx in range(num_2_cells):
                 sensor_indices, actuator_indices = cell_to_nodes[cell_idx]
                 
-                simplified_feat = torch.zeros(self.feature_dim_2)
+                enhanced_feat = torch.zeros(self.feature_dim_2)
                 
-                # Sensor features: mean and std
+                # Original 4D enhanced features: sensor mean/std, actuator median/range
                 if sensor_indices:
                     sensor_features = sample_x0[sensor_indices]
-                    simplified_feat[0] = torch.mean(sensor_features)
-                    simplified_feat[1] = torch.std(sensor_features) if len(sensor_indices) > 1 else 0.0
+                    enhanced_feat[0] = torch.mean(sensor_features)
+                    enhanced_feat[1] = torch.std(sensor_features) if len(sensor_indices) > 1 else 0.0
                 
-                # Actuator features: median and range
                 if actuator_indices:
                     actuator_features = sample_x0[actuator_indices]
-                    simplified_feat[2] = torch.median(actuator_features)
-                    simplified_feat[3] = torch.max(actuator_features) - torch.min(actuator_features)  # range
+                    enhanced_feat[2] = torch.median(actuator_features)
+                    enhanced_feat[3] = torch.max(actuator_features) - torch.min(actuator_features)  # range
                 
-                x_2[sample_idx, cell_idx] = simplified_feat
+                # Add flow balance feature if enabled
+                if self.use_flow_balance_features:
+                    # Each PLC corresponds to a stage (PLC_1 = Stage 0, PLC_2 = Stage 1, etc.)
+                    # We'll use cell_idx as the stage index
+                    if cell_idx in flow_indices:
+                        inflow_idx, outflow_idx = flow_indices[cell_idx]
+                        
+                        # Get the raw data values (not normalized x_0 values)
+                        inflow_value = self.data.iloc[sample_idx][self.columns[inflow_idx]]
+                        outflow_value = self.data.iloc[sample_idx][self.columns[outflow_idx]]
+                        
+                        # Compute flow balance (inflow - outflow)
+                        flow_balance = inflow_value - outflow_value
+                        
+                        # Normalize the flow balance (simple z-score normalization)
+                        # We'll compute mean and std across all samples for this stage
+                        if not hasattr(self, '_flow_balance_stats'):
+                            self._flow_balance_stats = {}
+                        
+                        if cell_idx not in self._flow_balance_stats:
+                            # Compute statistics for this stage across all samples
+                            all_inflow = self.data[self.columns[inflow_idx]].values
+                            all_outflow = self.data[self.columns[outflow_idx]].values
+                            all_balance = all_inflow - all_outflow
+                            
+                            balance_mean = np.mean(all_balance)
+                            balance_std = np.std(all_balance) + 1e-6  # Avoid division by zero
+                            
+                            self._flow_balance_stats[cell_idx] = (balance_mean, balance_std)
+                            print(f"    Stage {cell_idx+1} flow balance: mean={balance_mean:.4f}, std={balance_std:.4f}")
+                        
+                        balance_mean, balance_std = self._flow_balance_stats[cell_idx]
+                        normalized_flow_balance = (flow_balance - balance_mean) / balance_std
+                        
+                        # Store in the last dimension (index 4)
+                        enhanced_feat[4] = normalized_flow_balance
+                    else:
+                        # No flow balance available for this PLC
+                        enhanced_feat[4] = 0.0
+                
+                x_2[sample_idx, cell_idx] = enhanced_feat
         
-        print(f"Computed simplified 2-cell features shape: {x_2.shape}")
+        print(f"Computed enhanced 2-cell features shape: {x_2.shape}")
+        if self.use_flow_balance_features:
+            print(f"  Dimensions 0-3: sensor/actuator statistics")
+            print(f"  Dimension 4: flow balance features (stage inflow - outflow)")
+        
         return x_2
 
     def create_adjacency_matrices(self):

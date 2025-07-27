@@ -65,21 +65,35 @@ class AnomalyCCANN(nn.Module):
             
             # Decoders map from HMC's output dimension back to original feature dimension
             decoder_input_dim = channels_per_layer[-1][-1][-1]
-            self.decoder_x0 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_input_dim, output_dim=original_feature_dims['0'])
-            self.decoder_x1 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_input_dim, output_dim=original_feature_dims['1'])
-            self.decoder_x2 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_input_dim, output_dim=original_feature_dims['2'])
+            
+            # Create deeper decoders with more capacity for nonlinear reconstruction (temporal mode)
+            decoder_hidden_dim = decoder_input_dim * 2  # 2x capacity for better reconstruction
+            decoder_layers = 3  # Deeper decoders for complex patterns
+            
+            print(f"Creating deeper temporal decoders: input_dim={decoder_input_dim}, hidden_dim={decoder_hidden_dim}, layers={decoder_layers}")
+            
+            self.decoder_x0 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['0'], n_layers=decoder_layers)
+            self.decoder_x1 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['1'], n_layers=decoder_layers)
+            self.decoder_x2 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['2'], n_layers=decoder_layers)
 
         else: # Reconstruction mode
             print(f"Using reconstruction mode")
             print(f"Feature dimensions: 0-cells={original_feature_dims['0']}, 1-cells={original_feature_dims['1']}, 2-cells={original_feature_dims['2']}")
             self.encoder = HMC(
-                channels_per_layer=channels_per_layer
+                channels_per_layer=channels_per_layer,
+                negative_slope = 0.2
             )
             encoder_output_dim = channels_per_layer[-1][-1][-1]
-            # Create decoders for hierarchical reconstruction with appropriate output dimensions
-            self.decoder_x0 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dims['0'])
-            self.decoder_x1 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dims['1'])
-            self.decoder_x2 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=encoder_output_dim, output_dim=original_feature_dims['2'])
+            
+            # Create deeper decoders with more capacity for nonlinear reconstruction
+            decoder_hidden_dim = encoder_output_dim * 2  # 2x capacity for better reconstruction
+            decoder_layers = 3  # Deeper decoders for complex patterns
+            
+            print(f"Creating deeper decoders: input_dim={encoder_output_dim}, hidden_dim={decoder_hidden_dim}, layers={decoder_layers}")
+            
+            self.decoder_x0 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['0'], n_layers=decoder_layers)
+            self.decoder_x1 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['1'], n_layers=decoder_layers)
+            self.decoder_x2 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['2'], n_layers=decoder_layers)
 
     def forward(self, *args, **kwargs):
         # Correctly dispatch based on the mode

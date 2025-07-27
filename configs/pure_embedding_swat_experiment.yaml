@@ -1,0 +1,119 @@
+# Pure Embedding SWAT Experiment Configuration
+# NO GECO relationships - Pure data-driven graph learning approach
+# Similar to Graph Deviation Network (GDN) but with topological deep learning
+
+# Reproducibility
+seed: 42
+
+project_name: "esorics_pure_embedding_test"
+entity: "avdalovica"
+experiment_name: "pure_embedding_swat_no_geco"
+dataset_name: "SWAT"
+
+# System configuration
+system:
+  device: "cuda"
+  checkpoint_dir: "checkpoints"
+
+# Data configuration
+data:
+  data_dir: "data/SWAT"
+  train_path: "SWATv0_train.csv"
+  test_path: "SWATv0_test.csv"
+  sample_rate: 0.1  # 10% for good evaluation coverage
+  validation_split_ratio: 0.2
+  temporal_mode: false
+  temporal_sample_rate: 1
+  normalization_method: "mixed_normalization"  # Z-score for sensors, min-max for actuators
+  use_enhanced_2cell_features: true  # Enhanced 2-cell features
+  use_first_order_differences: true  # Enable first-order differences for 0-cells
+  use_first_order_differences_edges: false  # NO differences for 1-cells (edges)
+  use_flow_balance_features: true  # Flow balance features for PLCs
+
+# Topology configuration - PURE EMBEDDING APPROACH
+topology:
+  use_geco_relationships: false  # 🚫 NO GECO - Pure data-driven!
+  use_geco_features: false       # 🚫 NO GECO features in 1-cells
+  use_pure_embedding: true       # ✅ Use ONLY learned embeddings
+  embedding_similarity_threshold: 0.3  # Higher threshold for quality connections
+  min_edges_per_node: 3         # Ensure good connectivity
+  
+# Embedding configuration
+embedding:
+  embeddings_file: "embeddings/swat_embeddings.pkl"  # Pre-trained embeddings
+  embedding_dim: 64
+  top_k: 10
+  temperature: 1.0
+
+# Model configuration
+model:
+  name: "AnomalyCCANN"
+  channels_per_layer:
+    - [[2, 3, 5], [32, 32, 32], [64, 64, 64]]  # Input: [2D 0-cells, 3D 1-cells, 5D 2-cells]
+  original_feature_dims:
+    "0": 2  # 0-cells: normalized value + first-order difference
+    "1": 3  # 1-cells: two concatenated values + embedding similarity (NO GECO)
+    "2": 5  # 2-cells: enhanced 4D features + flow balance
+  dropout: 0.2
+  use_attention: true
+
+# Training configuration
+training:
+  epochs: 100
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 1e-4
+  gradient_clip: 1.0
+  early_stopping_patience: 15
+  reduce_lr_patience: 10
+  reduce_lr_factor: 0.5
+  min_lr: 1e-6
+
+# Anomaly detection configuration
+anomaly_detection:
+  threshold_method: "val"  # Use validation set for threshold calibration
+  threshold_percentile: 95
+  evaluation_method: "threshold"
+  use_two_threshold_alarm: true
+  plc_low_percentile: 85
+  plc_high_percentile: 95
+  temporal_consistency: true
+  temporal_window: 5
+
+# Evaluation configuration
+evaluation:
+  metrics: ["precision", "recall", "f1", "detection_rate", "false_positive_rate"]
+  save_predictions: true
+  save_reconstruction_errors: true
+
+# Logging configuration
+logging:
+  use_wandb: true
+  log_interval: 10
+  save_model: true
+  verbose: true
+
+# Comments and methodology
+comments: |
+  PURE EMBEDDING APPROACH - NO GECO RELATIONSHIPS
+  
+  This experiment tests a pure data-driven approach where:
+  1. 0-cells: Components with normalized values + first-order differences
+  2. 1-cells: ONLY learned relationships from embeddings (NO GECO)
+  3. 2-cells: Process zones (PLC) with enhanced features + flow balance
+  
+  Key differences from hybrid approach:
+  - NO GECO relationships or features
+  - Graph topology learned purely from reconstruction embeddings
+  - Similar to Graph Deviation Network (GDN) methodology
+  - Tests how much can be discovered from data alone
+  
+  Expected benefits:
+  - Pure data-driven discovery of relationships
+  - No bias from potentially incorrect GECO relationships
+  - Scalable to datasets without causal models
+  
+  Expected challenges:
+  - May miss important domain relationships
+  - Requires good embeddings for topology discovery
+  - Higher dependency on data quality and coverage 
