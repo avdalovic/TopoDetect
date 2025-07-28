@@ -62,6 +62,15 @@ class WADIDataset(Dataset):
         self.data = data
         self.wadi_complex = wadi_complex
         self.complex = wadi_complex.get_complex()
+        
+        # Remove first 21600 points (6 hours) from training data for WADI stabilization (like SWAT)
+        stabilization_point = 21600
+        if len(self.data) > stabilization_point:
+            print(f"Removing first {stabilization_point} data points (6 hours) for WADI stabilization")
+            self.data = self.data.iloc[stabilization_point:].reset_index(drop=True)
+            print(f"Training data after stabilization removal: {len(self.data)} samples")
+        else:
+            print(f"Warning: Training data has only {len(self.data)} samples, cannot remove {stabilization_point} points")
         self.feature_dim_0 = feature_dim_0
         self.n_input = n_input
         self.temporal_mode = temporal_mode
@@ -123,6 +132,8 @@ class WADIDataset(Dataset):
             self.feature_dim_1 = base_1cell_dim
             print(f"Using 1-cell features without differences: {self.feature_dim_1}D")
         
+        # Note: Cosine similarity will be added dynamically in _compute_new_x1 if available
+        
         # Override the feature_dim_0 for consistency
         self.feature_dim_0 = actual_feature_dim_0
         
@@ -146,6 +157,10 @@ class WADIDataset(Dataset):
             self.x_0 = self._compute_mixed_normalized_x0()
         elif normalization_method == "median_subtraction":
             self.x_0 = self._compute_median_subtraction_x0()
+        elif normalization_method == "minmax":
+            self.x_0 = self._compute_minmax_x0()
+        elif normalization_method == "minmax_proper":
+            self.x_0 = self._compute_minmax_proper_x0()
         else:
             raise ValueError(f"Unknown normalization method: {normalization_method}")
         
@@ -261,6 +276,10 @@ class WADIDataset(Dataset):
             return self._compute_mixed_normalized_x0()
         elif self.normalization_method == "median_subtraction":
             return self._compute_median_subtraction_x0()
+        elif self.normalization_method == "minmax":
+            return self._compute_minmax_x0()
+        elif self.normalization_method == "minmax_proper":
+            return self._compute_minmax_proper_x0()
         else:
             raise ValueError(f"Unknown normalization method: {self.normalization_method}")
 
@@ -530,6 +549,184 @@ class WADIDataset(Dataset):
         print(f"Feature tensor stats: min={features.min().item():.4f}, max={features.max().item():.4f}, mean={features.mean().item():.4f}")
         return features
 
+    def _compute_minmax_x0(self):
+        """
+        MinMax normalization for all components (sensors and actuators).
+        Optionally includes first-order differences as additional features.
+        """
+        print("Preprocessing features using MinMax normalization (0-1 range) for all components...")
+        if self.use_first_order_differences:
+            print("Computing first-order differences (current_value - previous_value)")
+            
+        num_samples = len(self.data)
+        num_components = len(self.columns)
+        
+        # Create tensor with appropriate dimension (1D or 2D if differences enabled)
+        features = torch.zeros(num_samples, num_components, self.feature_dim_0)
+        
+        for i, component in enumerate(self.columns):
+            values = self.data[component].values
+            
+            # Check for NaN or infinite values before processing
+            if np.any(np.isnan(values)) or np.any(np.isinf(values)):
+                print(f"  WARNING: {component} contains NaN or infinite values before normalization!")
+                # Replace NaN/inf with column mean
+                finite_mask = np.isfinite(values)
+                if np.any(finite_mask):
+                    mean_val = np.mean(values[finite_mask])
+                    values = np.where(finite_mask, values, mean_val)
+                else:
+                    values = np.zeros_like(values)
+                print(f"  Fixed NaN/inf values in {component} using mean={mean_val:.4f}")
+            
+            # MinMax normalization for all components
+            min_val = np.min(values)
+            max_val = np.max(values)
+            range_val = max_val - min_val
+            
+            # Handle case where min == max (constant values)
+            if range_val == 0:
+                # If all values are the same, set to 0.5 (middle of [0,1] range)
+                normalized_values = np.full_like(values, 0.5, dtype=float)
+                print(f"  {component}: constant value={min_val:.4f}, set to 0.5")
+            else:
+                # MinMax normalize: (x - min) / (max - min)
+                normalized_values = (values - min_val) / range_val
+                if i < 5:  # Only print details for first few components
+                    print(f"  {component}: min={min_val:.4f}, max={max_val:.4f}, range={range_val:.4f}")
+            
+            # Store normalized values in first dimension
+            features[:, i, 0] = torch.tensor(normalized_values, dtype=torch.float)
+            
+            # Compute first-order differences if enabled
+            if self.use_first_order_differences:
+                # Calculate lag-1 differences on NORMALIZED values (not raw values!)
+                normalized_differences = np.zeros_like(normalized_values)
+                normalized_differences[1:] = normalized_values[1:] - normalized_values[:-1]  # First sample difference = 0
+                
+                # Store normalized differences in the second dimension
+                features[:, i, 1] = torch.tensor(normalized_differences, dtype=torch.float32)
+                
+                # Print statistics about normalized differences
+                if i < 3:  # Only print for first few components to avoid spam
+                    mean_abs_diff = np.mean(np.abs(normalized_differences[1:]))  # Skip first zero
+                    max_abs_diff = np.max(np.abs(normalized_differences))
+                    print(f"    MinMax first-order diff: mean_abs={mean_abs_diff:.6f}, max_abs={max_abs_diff:.6f}")
+        
+        # Final check for NaN/inf in the entire feature tensor
+        if torch.any(torch.isnan(features)) or torch.any(torch.isinf(features)):
+            print("ERROR: Final feature tensor contains NaN or infinite values!")
+            # Replace NaN/inf with zeros
+            features = torch.where(torch.isfinite(features), features, torch.zeros_like(features))
+            print("Fixed by replacing NaN/inf with zeros")
+        
+        print(f"Computed 0-cell features shape: {features.shape}")
+        print(f"Feature tensor stats: min={features.min().item():.4f}, max={features.max().item():.4f}, mean={features.mean().item():.4f}")
+        if self.use_first_order_differences:
+            print(f"  Dimension 0: MinMax normalized values (0-1 range)")
+            print(f"  Dimension 1: First-order differences (lag-1)")
+        
+        return features
+
+    def _compute_minmax_proper_x0(self):
+        """
+        Proper MinMax normalization using training data parameters (MinMaxScaler approach).
+        This method implements the standard ML practice of fitting scaler on training data only.
+        Optionally includes first-order differences as additional features.
+        """
+        print("Preprocessing features using Proper MinMax normalization (MinMaxScaler approach)...")
+        if self.use_first_order_differences:
+            print("Computing first-order differences (current_value - previous_value)")
+            
+        num_samples = len(self.data)
+        num_components = len(self.columns)
+        
+        # Create tensor with appropriate dimension (1D or 2D if differences enabled)
+        features = torch.zeros(num_samples, num_components, self.feature_dim_0)
+        
+        for i, component in enumerate(self.columns):
+            values = self.data[component].values
+            
+            # Check for NaN or infinite values before processing
+            if np.any(np.isnan(values)) or np.any(np.isinf(values)):
+                print(f"  WARNING: {component} contains NaN or infinite values before normalization!")
+                # Replace NaN/inf with column mean
+                finite_mask = np.isfinite(values)
+                if np.any(finite_mask):
+                    mean_val = np.mean(values[finite_mask])
+                    values = np.where(finite_mask, values, mean_val)
+                else:
+                    values = np.zeros_like(values)
+                print(f"  Fixed NaN/inf values in {component} using mean={mean_val:.4f}")
+            
+            # Use training data parameters for MinMax normalization (proper ML approach)
+            if hasattr(self, 'train_min_vals') and hasattr(self, 'train_max_vals') and len(self.train_min_vals) > i:
+                # Use pre-computed training parameters (validation/test data)
+                min_val = self.train_min_vals[i]
+                max_val = self.train_max_vals[i]
+                range_val = max_val - min_val
+                
+                if range_val == 0:
+                    normalized_values = np.full_like(values, 0.5, dtype=float)
+                    print(f"  {component}: using training params, constant value={min_val:.4f}, set to 0.5")
+                else:
+                    normalized_values = (values - min_val) / range_val
+                    if i < 5:  # Only print details for first few components
+                        print(f"  {component}: using training params, min={min_val:.4f}, max={max_val:.4f}")
+            else:
+                # This is training data - compute and store parameters
+                min_val = np.min(values)
+                max_val = np.max(values)
+                range_val = max_val - min_val
+                
+                # Store for future use (validation/test)
+                if not hasattr(self, 'train_min_vals'):
+                    self.train_min_vals = []
+                    self.train_max_vals = []
+                self.train_min_vals.append(min_val)
+                self.train_max_vals.append(max_val)
+                
+                if range_val == 0:
+                    normalized_values = np.full_like(values, 0.5, dtype=float)
+                    print(f"  {component}: training data, constant value={min_val:.4f}, set to 0.5")
+                else:
+                    normalized_values = (values - min_val) / range_val
+                    if i < 5:  # Only print details for first few components
+                        print(f"  {component}: training data, min={min_val:.4f}, max={max_val:.4f}, range={range_val:.4f}")
+            
+            # Store normalized values in first dimension
+            features[:, i, 0] = torch.tensor(normalized_values, dtype=torch.float)
+            
+            # Compute first-order differences if enabled
+            if self.use_first_order_differences:
+                # Calculate lag-1 differences on NORMALIZED values (not raw values!)
+                normalized_differences = np.zeros_like(normalized_values)
+                normalized_differences[1:] = normalized_values[1:] - normalized_values[:-1]  # First sample difference = 0
+                
+                # Store normalized differences in the second dimension
+                features[:, i, 1] = torch.tensor(normalized_differences, dtype=torch.float32)
+                
+                # Print statistics about normalized differences
+                if i < 3:  # Only print for first few components to avoid spam
+                    mean_abs_diff = np.mean(np.abs(normalized_differences[1:]))  # Skip first zero
+                    max_abs_diff = np.max(np.abs(normalized_differences))
+                    print(f"    Proper MinMax first-order diff: mean_abs={mean_abs_diff:.6f}, max_abs={max_abs_diff:.6f}")
+        
+        # Final check for NaN/inf in the entire feature tensor
+        if torch.any(torch.isnan(features)) or torch.any(torch.isinf(features)):
+            print("ERROR: Final feature tensor contains NaN or infinite values!")
+            # Replace NaN/inf with zeros
+            features = torch.where(torch.isfinite(features), features, torch.zeros_like(features))
+            print("Fixed by replacing NaN/inf with zeros")
+        
+        print(f"Computed 0-cell features shape: {features.shape}")
+        print(f"Feature tensor stats: min={features.min().item():.4f}, max={features.max().item():.4f}, mean={features.mean().item():.4f}")
+        if self.use_first_order_differences:
+            print(f"  Dimension 0: Proper MinMax normalized values (0-1 range)")
+            print(f"  Dimension 1: First-order differences (lag-1)")
+        
+        return features
+
     def compute_initial_x1(self):
         """
         Initialize 1-cell features based on connected 0-cells.
@@ -729,12 +926,44 @@ class WADIDataset(Dataset):
                 
                 x_1[sample_idx, new_cell_idx] = final_edge_feat
 
+        # Add cosine similarity features for edges (like SWAT implementation)
+        if hasattr(self.wadi_complex, 'get_embedding_similarity'):
+            print("Adding cosine similarity features for 1-cells...")
+            
+            # Create new tensor with additional dimension for cosine similarity
+            x_1_with_similarity = torch.zeros((num_samples, num_1_cells, self.feature_dim_1 + 1))
+            
+            for new_cell_idx, cell in enumerate(valid_cells_1):
+                boundary_nodes = list(cell)
+                
+                # Get cosine similarity between the two nodes
+                try:
+                    similarity = self.wadi_complex.get_embedding_similarity(boundary_nodes[0], boundary_nodes[1])
+                    similarity_tensor = torch.tensor(similarity, dtype=torch.float32)
+                except Exception as e:
+                    print(f"Warning: Could not compute similarity for edge {boundary_nodes}: {e}")
+                    similarity_tensor = torch.tensor(0.0, dtype=torch.float32)
+                
+                # Add similarity to all samples for this edge
+                for sample_idx in range(num_samples):
+                    # Copy original features
+                    x_1_with_similarity[sample_idx, new_cell_idx, :-1] = x_1[sample_idx, new_cell_idx]
+                    # Add similarity as the last feature
+                    x_1_with_similarity[sample_idx, new_cell_idx, -1] = similarity_tensor
+            
+            # Update x_1 and feature dimension
+            x_1 = x_1_with_similarity
+            self.feature_dim_1 += 1
+            print(f"Added cosine similarity features. New 1-cell feature dimension: {self.feature_dim_1}D")
+
         print(f"Computed 1-cell features shape: {x_1.shape}")
         if self.use_first_order_differences:
             print(f"  Each 1-cell uses only VALUES (not differences) from {self.feature_dim_0}D 0-cell features" + 
                   (f" + 1D GECO" if self.use_geco_features else ""))
         if self.use_first_order_differences_edges:
             print(f"  + 1D first-order differences for edges")
+        if hasattr(self.wadi_complex, 'get_embedding_similarity'):
+            print(f"  + 1D cosine similarity features")
         
         return x_1
 

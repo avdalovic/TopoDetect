@@ -157,28 +157,18 @@ class PureEmbeddingTopologyConstructor:
                 }
             ]
         elif self.dataset_type == 'wadi':
-            return [
-                {
-                    'name': 'RawWater',
-                    'components': ['1_AIT_001_PV', '1_AIT_002_PV', '1_FIT_001_PV', '1_LIT_001_PV']
-                },
-                {
-                    'name': 'Elevated',
-                    'components': ['1_LS_001_AL', '1_LS_002_AL', '1_MV_001_STATUS', '1_P_001_STATUS', '1_P_002_STATUS']
-                },
-                {
-                    'name': 'Booster',
-                    'components': ['2_DPIT_001_PV', '2_FIT_001_PV', '2_MV_001_STATUS', '2_P_001_STATUS', '2_P_002_STATUS']
-                },
-                {
-                    'name': 'Consumers',
-                    'components': ['2_FIC_101_CO', '2_FIC_101_PV', '2_FIC_101_SP', '2_FIC_201_CO', '2_FIC_201_PV', '2_FIC_201_SP']
-                },
-                {
-                    'name': 'Return',
-                    'components': ['3_AIT_001_PV', '3_AIT_002_PV', '3_FIT_001_PV', '3_LIT_001_PV']
-                }
-            ]
+            # Import the complete WADI subsystem map
+            from src.utils.attack_utils import WADI_SUB_MAP
+            
+            # Convert the complete subsystem map to our format
+            plc_zones = []
+            for zone_name, components in WADI_SUB_MAP.items():
+                plc_zones.append({
+                    'name': zone_name,
+                    'components': components
+                })
+            
+            return plc_zones
         else:
             return []
     

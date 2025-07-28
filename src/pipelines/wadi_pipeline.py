@@ -332,10 +332,49 @@ def run_experiment(config):
     filtered_components = [col for col in all_columns if col not in remove_list]
     print(f"Creating WADI complex with {len(filtered_components)} components (after filtering)")
     
-    # Create WADI complex with GECO relationships
+    # Create WADI topology with optional GECO features and pure embedding support
     use_geco_relationships = config.get('topology', {}).get('use_geco_relationships', True)
-    wadi_complex = WADIComplex(component_names=filtered_components, use_geco_relationships=use_geco_relationships)
-    complex_obj = wadi_complex.get_complex()
+    use_pure_embedding = config.get('topology', {}).get('use_pure_embedding', False)
+    
+    if use_pure_embedding:
+        print("🧠 Using Pure Embedding Topology (NO GECO)")
+        from src.utils.topology.pure_embedding_topology import create_pure_embedding_wadi_complex
+        
+        embeddings_file = config.get('embedding', {}).get('embeddings_file', 'embeddings/wadi_embeddings.pkl')
+        similarity_threshold = config.get('topology', {}).get('embedding_similarity_threshold', 0.3)
+        min_edges_per_node = config.get('topology', {}).get('min_edges_per_node', 3)
+        
+        print(f"  📊 Embeddings file: {embeddings_file}")
+        print(f"  🎯 Similarity threshold: {similarity_threshold}")
+        print(f"  🔗 Min edges per node: {min_edges_per_node}")
+        
+        pure_complex = create_pure_embedding_wadi_complex(
+            embeddings_file=embeddings_file,
+            similarity_threshold=similarity_threshold,
+            min_edges_per_node=min_edges_per_node
+        )
+        
+        # Create a wrapper object to match WADIDataset expectations
+        class PureEmbeddingWrapper:
+            def __init__(self, complex):
+                self._complex = complex
+            def get_complex(self):
+                return self._complex
+            def _get_node_index_map(self):
+                """Helper to create a mapping from component name to its index in the complex."""
+                row_dict_01, _, _ = self._complex.incidence_matrix(0, 1, index=True)
+                return {list(k)[0]: v for k, v in row_dict_01.items()}
+        
+        wadi_complex = PureEmbeddingWrapper(pure_complex)
+        complex_obj = wadi_complex.get_complex()
+    else:
+        wadi_complex = WADIComplex(component_names=filtered_components, use_geco_relationships=use_geco_relationships)
+        complex_obj = wadi_complex.get_complex()
+        
+        if use_geco_relationships:
+            print("Using GECO-learned relationships from WADI.model")
+        else:
+            print("Using manually defined relationships")
     
     print(f"WADI complex created: {complex_obj}")
     
@@ -359,57 +398,144 @@ def run_experiment(config):
     # Check if GECO features should be used
     use_geco_features = config.get('topology', {}).get('use_geco_features', False)
     
-    train_dataset = WADIDataset(
-        data=train_data,
-        wadi_complex=wadi_complex,
-        temporal_mode=config['data']['temporal_mode'],
-        temporal_sample_rate=config['data']['temporal_sample_rate'],
-        use_geco_features=use_geco_features,
-        normalization_method=normalization_method,
-        use_enhanced_2cell_features=use_enhanced_2cell_features,
-        use_first_order_differences=use_first_order_differences,
-        use_first_order_differences_edges=use_first_order_differences_edges,
-        use_pressure_differential_features=use_pressure_differential_features,
-        seed=config.get('seed', 42)
-    )
-    
-    # Get expected feature count from training dataset
-    expected_feature_count = len(train_dataset.columns)
-    print(f"Training dataset established {expected_feature_count} features as the standard")
-    
-    validation_dataset = WADIDataset(
-        data=validation_data,
-        wadi_complex=wadi_complex,
-        temporal_mode=config['data']['temporal_mode'],
-        temporal_sample_rate=config['data']['temporal_sample_rate'],
-        use_geco_features=use_geco_features,
-        normalization_method=normalization_method,
-        use_enhanced_2cell_features=use_enhanced_2cell_features,
-        use_first_order_differences=use_first_order_differences,
-        use_first_order_differences_edges=use_first_order_differences_edges,
-        use_pressure_differential_features=use_pressure_differential_features,
-        seed=config.get('seed', 42)
-    ) if not validation_data.empty else None
-    
-    # Ensure validation dataset matches training feature count (only if dataset exists)
-    if validation_dataset is not None:
-        validation_dataset.expected_feature_count = expected_feature_count
-    
-    test_dataset = WADIDataset(
-        data=test_data,
-        wadi_complex=wadi_complex,
-        temporal_mode=config['data']['temporal_mode'],
-        temporal_sample_rate=config['data']['temporal_sample_rate'],
-        use_geco_features=use_geco_features,
-        normalization_method=normalization_method,
-        use_enhanced_2cell_features=use_enhanced_2cell_features,
-        use_first_order_differences=use_first_order_differences,
-        use_first_order_differences_edges=use_first_order_differences_edges,
-        use_pressure_differential_features=use_pressure_differential_features,
-        seed=config.get('seed', 42)
-    )
-    # Ensure test dataset matches training feature count
-    test_dataset.expected_feature_count = expected_feature_count
+    # OPTIMIZATION: For proper MinMax normalization, create training dataset first
+    if normalization_method == "minmax_proper":
+        print("Using proper MinMax normalization - creating training dataset first to establish parameters...")
+        
+        # Create training dataset first
+        train_dataset = WADIDataset(
+            data=train_data,
+            wadi_complex=wadi_complex,
+            temporal_mode=config['data']['temporal_mode'],
+            temporal_sample_rate=config['data']['temporal_sample_rate'],
+            use_geco_features=use_geco_features,
+            normalization_method=normalization_method,
+            use_enhanced_2cell_features=use_enhanced_2cell_features,
+            use_first_order_differences=use_first_order_differences,
+            use_first_order_differences_edges=use_first_order_differences_edges,
+            use_pressure_differential_features=use_pressure_differential_features,
+            seed=config.get('seed', 42)
+        )
+        
+        # Get expected feature count from training dataset
+        expected_feature_count = len(train_dataset.columns)
+        print(f"Training dataset established {expected_feature_count} features as the standard")
+        
+        # Create validation dataset with shared parameters
+        if not validation_data.empty:
+            print("Creating validation dataset with shared training parameters...")
+            validation_dataset = WADIDataset(
+                data=validation_data,
+                wadi_complex=wadi_complex,
+                temporal_mode=config['data']['temporal_mode'],
+                temporal_sample_rate=config['data']['temporal_sample_rate'],
+                use_geco_features=use_geco_features,
+                normalization_method=normalization_method,
+                use_enhanced_2cell_features=use_enhanced_2cell_features,
+                use_first_order_differences=use_first_order_differences,
+                use_first_order_differences_edges=use_first_order_differences_edges,
+                use_pressure_differential_features=use_pressure_differential_features,
+                seed=config.get('seed', 42)
+            )
+            
+            # Share training parameters
+            validation_dataset.train_min_vals = train_dataset.train_min_vals
+            validation_dataset.train_max_vals = train_dataset.train_max_vals
+            validation_dataset.expected_feature_count = expected_feature_count
+            
+            # Recompute features with shared parameters
+            validation_dataset.x_0 = validation_dataset.compute_initial_x0()
+            validation_dataset.x_1 = validation_dataset.compute_initial_x1()
+            validation_dataset.x_2 = validation_dataset.compute_initial_x2()
+            
+            print(f"Validation dataset created with {len(validation_dataset)} samples")
+        else:
+            validation_dataset = None
+            print("No validation data available")
+        
+        # Create test dataset with shared parameters
+        print("Creating test dataset with shared training parameters...")
+        test_dataset = WADIDataset(
+            data=test_data,
+            wadi_complex=wadi_complex,
+            temporal_mode=config['data']['temporal_mode'],
+            temporal_sample_rate=config['data']['temporal_sample_rate'],
+            use_geco_features=use_geco_features,
+            normalization_method=normalization_method,
+            use_enhanced_2cell_features=use_enhanced_2cell_features,
+            use_first_order_differences=use_first_order_differences,
+            use_first_order_differences_edges=use_first_order_differences_edges,
+            use_pressure_differential_features=use_pressure_differential_features,
+            seed=config.get('seed', 42)
+        )
+        
+        # Share training parameters
+        test_dataset.train_min_vals = train_dataset.train_min_vals
+        test_dataset.train_max_vals = train_dataset.train_max_vals
+        test_dataset.expected_feature_count = expected_feature_count
+        
+        # Recompute features with shared parameters
+        test_dataset.x_0 = test_dataset.compute_initial_x0()
+        test_dataset.x_1 = test_dataset.compute_initial_x1()
+        test_dataset.x_2 = test_dataset.compute_initial_x2()
+        
+        print(f"Test dataset created with {len(test_dataset)} samples")
+        
+    else:
+        # Standard approach for other normalization methods
+        print("Using standard dataset creation approach...")
+        
+        train_dataset = WADIDataset(
+            data=train_data,
+            wadi_complex=wadi_complex,
+            temporal_mode=config['data']['temporal_mode'],
+            temporal_sample_rate=config['data']['temporal_sample_rate'],
+            use_geco_features=use_geco_features,
+            normalization_method=normalization_method,
+            use_enhanced_2cell_features=use_enhanced_2cell_features,
+            use_first_order_differences=use_first_order_differences,
+            use_first_order_differences_edges=use_first_order_differences_edges,
+            use_pressure_differential_features=use_pressure_differential_features,
+            seed=config.get('seed', 42)
+        )
+        
+        # Get expected feature count from training dataset
+        expected_feature_count = len(train_dataset.columns)
+        print(f"Training dataset established {expected_feature_count} features as the standard")
+        
+        validation_dataset = WADIDataset(
+            data=validation_data,
+            wadi_complex=wadi_complex,
+            temporal_mode=config['data']['temporal_mode'],
+            temporal_sample_rate=config['data']['temporal_sample_rate'],
+            use_geco_features=use_geco_features,
+            normalization_method=normalization_method,
+            use_enhanced_2cell_features=use_enhanced_2cell_features,
+            use_first_order_differences=use_first_order_differences,
+            use_first_order_differences_edges=use_first_order_differences_edges,
+            use_pressure_differential_features=use_pressure_differential_features,
+            seed=config.get('seed', 42)
+        ) if not validation_data.empty else None
+        
+        # Ensure validation dataset matches training feature count (only if dataset exists)
+        if validation_dataset is not None:
+            validation_dataset.expected_feature_count = expected_feature_count
+        
+        test_dataset = WADIDataset(
+            data=test_data,
+            wadi_complex=wadi_complex,
+            temporal_mode=config['data']['temporal_mode'],
+            temporal_sample_rate=config['data']['temporal_sample_rate'],
+            use_geco_features=use_geco_features,
+            normalization_method=normalization_method,
+            use_enhanced_2cell_features=use_enhanced_2cell_features,
+            use_first_order_differences=use_first_order_differences,
+            use_first_order_differences_edges=use_first_order_differences_edges,
+            use_pressure_differential_features=use_pressure_differential_features,
+            seed=config.get('seed', 42)
+        )
+        # Ensure test dataset matches training feature count
+        test_dataset.expected_feature_count = expected_feature_count
 
     # Create dataloaders
     batch_size = config['training']['batch_size']
@@ -476,9 +602,10 @@ def run_experiment(config):
     if 'fp_alarm_window_seconds' in eval_config:
         eval_config['fp_alarm_window'] = eval_config.pop('fp_alarm_window_seconds')
     
-    # Remove threshold_percentile from eval_config to avoid duplicate parameter
-    if 'threshold_percentile' in eval_config:
-        eval_config.pop('threshold_percentile')
+    # Remove parameters that AnomalyTrainer doesn't accept
+    for param in ['threshold_percentile', 'metrics', 'save_predictions', 'save_reconstruction_errors']:
+        if param in eval_config:
+            eval_config.pop(param)
     
     # Add enhanced time-aware metrics parameters
     enhanced_metrics_config = config.get('enhanced_time_aware_metrics', {})
