@@ -1,0 +1,45 @@
+# WADI Dataset Configuration - MinMax Proper Normalization with 20% Data Sampling
+# Enhanced topology with embedding similarity and proper data preprocessing
+
+dataset: "wadi"
+experiment_name: "wadi_minmax_proper_embedding_similarity_20p"
+
+# Data sampling and preprocessing
+sample_rate: 0.2
+validation_split_ratio: 0.2
+remove_stabilization_points: 21600  # Remove first 6 hours for stabilization
+
+# Topology configuration
+topology_type: "pure_embedding"
+embedding_similarity_threshold: 0.3
+min_edges_per_node: 3
+use_geco_features: false
+
+# Feature engineering
+normalization_method: "minmax_proper"  # Proper MinMaxScaler approach
+enhanced_2cell: true
+first_order_diff_nodes: true
+first_order_diff_edges: false
+pressure_differential_features: false
+
+# Model hyperparameters
+epochs: 5
+batch_size: 64
+learning_rate: 0.0005
+dropout: 0.2
+hidden_dim: 128
+
+# Anomaly detection
+temporal_consistency: 3
+threshold_percentile: 99
+
+# Logging and evaluation
+log_interval: 10
+save_interval: 1
+eval_interval: 1
+use_wandb: true
+wandb_project: "anomaly-detection-wadi"
+wandb_entity: null
+
+# Random seed for reproducibility
+seed: 42 
