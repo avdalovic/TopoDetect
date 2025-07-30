@@ -897,7 +897,7 @@ class WADIDataset(Dataset):
                 # Add GECO features if enabled
                 if self.use_geco_features:
                     if geco_features is not None:
-                        # Simplified GECO features: only normalized strength
+                        # Simplified GECO features: only normalized strength (1D)
                         geco_feat = torch.tensor([
                             geco_features['geco_normalized_strength']  # Only normalized strength
                         ], dtype=torch.float32)
@@ -906,7 +906,7 @@ class WADIDataset(Dataset):
                         geco_feat = torch.tensor([0.0], dtype=torch.float32)  # Zero strength for non-GECO
                     
                     # Concatenate original features with simplified GECO features
-                    edge_feat = torch.cat([edge_feat, geco_feat], dim=0)  # 3D total feature (2D + 1D GECO)
+                    edge_feat = torch.cat([edge_feat, geco_feat], dim=0)  # Total feature with GECO
                 
                 x_1[sample_idx, new_cell_idx] = edge_feat
 
@@ -994,7 +994,7 @@ class WADIDataset(Dataset):
                 # Add GECO features if enabled
                 if self.use_geco_features:
                     if geco_features is not None:
-                        # Simplified GECO features: only normalized strength
+                        # Simplified GECO features: only normalized strength (1D)
                         geco_feat = torch.tensor([
                             geco_features['geco_normalized_strength']  # Only normalized strength
                         ], dtype=torch.float32)
