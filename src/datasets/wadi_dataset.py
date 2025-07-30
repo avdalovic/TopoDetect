@@ -26,7 +26,7 @@ class WADIDataset(Dataset):
     
     def __init__(self, data, wadi_complex, feature_dim_0=3, n_input=10, temporal_mode=False, temporal_sample_rate=1, use_geco_features=False, 
                  normalization_method="standard", use_enhanced_2cell_features=False, use_first_order_differences=False,
-                 use_first_order_differences_edges=True, use_pressure_differential_features=False, use_categorical_embeddings=False, seed=None):
+                 use_first_order_differences_edges=True, use_pressure_differential_features=False, use_categorical_embeddings=False, seed=None, is_training_data=True):
         """
         Initialize WADI dataset.
         
@@ -58,19 +58,26 @@ class WADIDataset(Dataset):
             DEPRECATED: Physics features removed due to causing loss instability
         seed : int, optional
             Random seed for reproducibility
+        is_training_data : bool, default=True
+            Whether this is training data (stabilization removal only applies to training)
         """
         self.data = data
         self.wadi_complex = wadi_complex
         self.complex = wadi_complex.get_complex()
         
-        # Remove first 21600 points (6 hours) from training data for WADI stabilization (like SWAT)
-        stabilization_point = 2160
-        if len(self.data) > stabilization_point:
-            print(f"Removing first {stabilization_point} data points (6 hours) for WADI stabilization")
-            self.data = self.data.iloc[stabilization_point:].reset_index(drop=True)
-            print(f"Training data after stabilization removal: {len(self.data)} samples")
+        # Remove first 2160 points (6 hours) from training data for WADI stabilization (like SWAT)
+        # ONLY apply to training data, not test/validation data
+        if is_training_data:
+            stabilization_point = 2160
+            if len(self.data) > stabilization_point:
+                print(f"Removing first {stabilization_point} data points (6 hours) for WADI stabilization (training data only)")
+                self.data = self.data.iloc[stabilization_point:].reset_index(drop=True)
+                print(f"Training data after stabilization removal: {len(self.data)} samples")
+            else:
+                print(f"Warning: Training data has only {len(self.data)} samples, cannot remove {stabilization_point} points")
         else:
-            print(f"Warning: Training data has only {len(self.data)} samples, cannot remove {stabilization_point} points")
+            print(f"Test/validation data: no stabilization removal applied ({len(self.data)} samples)")
+        
         self.feature_dim_0 = feature_dim_0
         self.n_input = n_input
         self.temporal_mode = temporal_mode
@@ -83,6 +90,7 @@ class WADIDataset(Dataset):
         self.use_pressure_differential_features = use_pressure_differential_features
         self.use_categorical_embeddings = use_categorical_embeddings
         self.seed = seed
+        self.is_training_data = is_training_data
         
         # Set seed if provided
         if seed is not None:

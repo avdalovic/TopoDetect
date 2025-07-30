@@ -39,10 +39,10 @@ topology:
 model:
   name: "AnomalyCCANN"
   channels_per_layer:
-    - [[2, 2, 4], [32, 32, 32], [64, 64, 64]]  # Standard architecture
+    - [[2, 2, 4], [32, 32, 32], [64, 64, 64]]  # Base dimensions (will be enhanced by pipeline)
   original_feature_dims:
     "0": 2  # 0-cells: Proper MinMax normalized value + first-order difference
-    "1": 2  # 1-cells: concatenated Proper MinMax values (no GECO features)
+    "1": 2  # 1-cells: concatenated Proper MinMax values
     "2": 4  # 2-cells: enhanced features (sensor mean/std, actuator median/range)
   use_enhanced_decoders: true  # 🚀 Enable enhanced skip connections
   dropout: 0.1

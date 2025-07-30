@@ -19,7 +19,7 @@ data:
   data_dir: "data/WADI"
   train_path: "WADI_train.csv"
   test_path: "WADI_test.csv"
-  sample_rate: 0.1  # 🚀 10% for better performance evaluation
+  sample_rate: 0.1  #  10% for better performance evaluation
   validation_split_ratio: 0.2
   temporal_mode: false
   temporal_sample_rate: 1
@@ -48,7 +48,7 @@ embedding:
 model:
   name: "AnomalyCCANN"
   channels_per_layer:
-    - [[2, 3, 4], [32, 32, 32], [64, 64, 64]]  # Base dimensions (will be enhanced by model)
+    - [[2, 3, 4], [32, 32, 32], [64, 64, 64]]  # Base dimensions (will be enhanced to 10D by pipeline)
   original_feature_dims:
     "0": 2   # 0-cells: Only normalized_value + first_order_diff (embeddings added by model)
     "1": 2   # 1-cells: concatenated Proper MinMax values (no cosine similarity for now)

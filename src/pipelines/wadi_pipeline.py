@@ -415,7 +415,8 @@ def run_experiment(config):
             use_first_order_differences_edges=use_first_order_differences_edges,
             use_pressure_differential_features=use_pressure_differential_features,
             use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
-            seed=config.get('seed', 42)
+            seed=config.get('seed', 42),
+            is_training_data=True  # Training data gets stabilization removal
         )
         
         # Get expected feature count from training dataset
@@ -437,7 +438,8 @@ def run_experiment(config):
                 use_first_order_differences_edges=use_first_order_differences_edges,
                 use_pressure_differential_features=use_pressure_differential_features,
                 use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
-                seed=config.get('seed', 42)
+                seed=config.get('seed', 42),
+                is_training_data=False  # Validation data gets no stabilization removal
             )
             
             # Share training parameters
@@ -471,7 +473,8 @@ def run_experiment(config):
             use_first_order_differences_edges=use_first_order_differences_edges,
             use_pressure_differential_features=use_pressure_differential_features,
             use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
-            seed=config.get('seed', 42)
+            seed=config.get('seed', 42),
+            is_training_data=False  # Test data gets no stabilization removal
         )
         
         # Share training parameters
@@ -504,7 +507,8 @@ def run_experiment(config):
             use_first_order_differences_edges=use_first_order_differences_edges,
             use_pressure_differential_features=use_pressure_differential_features,
             use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
-            seed=config.get('seed', 42)
+            seed=config.get('seed', 42),
+            is_training_data=True  # Training data gets stabilization removal
         )
         
         # Get expected feature count from training dataset
@@ -523,7 +527,8 @@ def run_experiment(config):
             use_first_order_differences_edges=use_first_order_differences_edges,
             use_pressure_differential_features=use_pressure_differential_features,
             use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
-            seed=config.get('seed', 42)
+            seed=config.get('seed', 42),
+            is_training_data=False  # Validation data gets no stabilization removal
         ) if not validation_data.empty else None
         
         # Ensure validation dataset matches training feature count (only if dataset exists)
@@ -542,7 +547,8 @@ def run_experiment(config):
             use_first_order_differences_edges=use_first_order_differences_edges,
             use_pressure_differential_features=use_pressure_differential_features,
             use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
-            seed=config.get('seed', 42)
+            seed=config.get('seed', 42),
+            is_training_data=False  # Test data gets no stabilization removal
         )
         # Ensure test dataset matches training feature count
         test_dataset.expected_feature_count = expected_feature_count
@@ -586,10 +592,24 @@ def run_experiment(config):
     # Dynamically update model input channels based on dataset feature dimensions
     # This ensures the model architecture from the config is respected while using correct input dimensions
     channels_per_layer = config['model']['channels_per_layer']
+    
+    # Check if categorical embeddings are enabled
+    use_categorical_embeddings = config['model'].get('use_categorical_embeddings', False)
+    categorical_embedding_dim = config['model'].get('categorical_embedding_dim', 8)
+    
+    # Calculate input dimensions
+    base_dim_0 = train_dataset.feature_dim_0
+    if use_categorical_embeddings:
+        # Categorical embeddings enhance 0-cell features
+        enhanced_dim_0 = base_dim_0 + categorical_embedding_dim
+        print(f"Categorical embeddings enabled: enhancing 0-cell features from {base_dim_0}D to {enhanced_dim_0}D")
+    else:
+        enhanced_dim_0 = base_dim_0
+    
     in_channels = [
-        train_dataset.feature_dim_0,
-        train_dataset.feature_dim_1,
-        train_dataset.feature_dim_2
+        enhanced_dim_0,  # 0-cells: base_dim + embeddings (if enabled)
+        train_dataset.feature_dim_1,  # 1-cells: unchanged
+        train_dataset.feature_dim_2   # 2-cells: unchanged
     ]
     channels_per_layer[0][0] = in_channels
     print(f"Dynamically updated model input channels to: {in_channels}")
