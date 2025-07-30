@@ -1,0 +1,98 @@
+# WADI Categorical Embeddings Experiment
+# Testing categorical embeddings for sensor/actuator types with proper MinMax normalization
+# Using 10% of data for faster experimentation
+
+seed: 42
+
+project_name: "WADI_TopoDetect"
+entity: "avdalovica"
+experiment_name: "wadi_categorical_embeddings_10p"
+dataset_name: "WADI"
+
+# System configuration
+system:
+  device: "cuda"
+  checkpoint_dir: "checkpoints"
+
+# Data configuration - 10% SAMPLE FOR TESTING
+data:
+  data_dir: "data/WADI"
+  train_path: "WADI_train.csv"
+  test_path: "WADI_test.csv"
+  sample_rate: 0.1  # 🚀 10% for better performance evaluation
+  validation_split_ratio: 0.2
+  temporal_mode: false
+  temporal_sample_rate: 1
+  normalization_method: "minmax_proper"  # ✅ Proper MinMax normalization (MinMaxScaler approach)
+  use_enhanced_2cell_features: true  # ✅ Enhanced 2-cell features
+  use_first_order_differences: true  # ✅ Include first-order differences
+  use_first_order_differences_edges: false  # ❌ NO differences for edges (cleaner)
+  remove_stabilization_points: 0
+  use_categorical_embeddings: true  # 🚀 NEW: Enable categorical embeddings
+
+# Topology configuration - PURE EMBEDDING SIMILARITY
+topology:
+  use_geco_relationships: false  # 🚫 NO GECO relationships
+  use_geco_features: false       # 🚫 NO GECO features
+  use_pure_embedding: true       # ✅ Use ONLY learned embeddings for similarity
+  embedding_similarity_threshold: 0.3
+  min_edges_per_node: 3
+
+# Embedding configuration
+embedding:
+  embeddings_file: "embeddings/wadi_embeddings.pkl"
+  embedding_dim: 64
+  top_k: 15
+
+# Model configuration - CATEGORICAL EMBEDDINGS
+model:
+  name: "AnomalyCCANN"
+  channels_per_layer:
+    - [[2, 3, 4], [32, 32, 32], [64, 64, 64]]  # Base dimensions (will be enhanced by model)
+  original_feature_dims:
+    "0": 2   # 0-cells: Only normalized_value + first_order_diff (embeddings added by model)
+    "1": 2   # 1-cells: concatenated Proper MinMax values (no cosine similarity for now)
+    "2": 4   # 2-cells: enhanced features (sensor mean/std, actuator median/range)
+  use_enhanced_decoders: true  # 🚀 Enable enhanced skip connections
+  use_categorical_embeddings: true  # 🚀 NEW: Enable categorical embeddings
+  num_sensor_types: 14  # Number of sensor/actuator types (0-13, so 14 total)
+  categorical_embedding_dim: 8  # 🚀 NEW: Dimension of categorical embeddings
+  dropout: 0.1
+  use_attention: false
+
+# Training configuration
+training:
+  epochs: 5  # Moderate epochs for testing
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 1e-4
+  grad_clip_value: 1.0
+  test_interval: 1
+  early_stopping:
+    enabled: true
+    patience: 5
+    min_delta: 0.001
+  reduce_lr_patience: 3
+  reduce_lr_factor: 0.7
+  min_lr: 1e-5
+
+# Anomaly detection
+anomaly_detection:
+  threshold_method: "validation"  # Use validation data for threshold
+  threshold_percentile: 99
+  evaluation_method: "threshold"
+  use_two_threshold_alarm: false
+  temporal_consistency: 3
+
+# Evaluation
+evaluation:
+  metrics: ["f1", "precision", "recall", "auc"]
+  save_predictions: true
+  save_reconstruction_errors: true
+
+# Logging
+logging:
+  use_wandb: true
+  log_interval: 5
+  save_model: true
+  verbose: true 

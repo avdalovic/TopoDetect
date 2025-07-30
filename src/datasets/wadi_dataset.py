@@ -5,7 +5,7 @@ from torch.utils.data import Dataset
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
-from src.utils.attack_utils import is_actuator
+from src.utils.attack_utils import is_actuator, classify_wadi_sensor_type
 
 def set_seed(seed):
     """Set random seed for reproducibility."""
@@ -26,7 +26,7 @@ class WADIDataset(Dataset):
     
     def __init__(self, data, wadi_complex, feature_dim_0=3, n_input=10, temporal_mode=False, temporal_sample_rate=1, use_geco_features=False, 
                  normalization_method="standard", use_enhanced_2cell_features=False, use_first_order_differences=False,
-                 use_first_order_differences_edges=True, use_pressure_differential_features=False, seed=None):
+                 use_first_order_differences_edges=True, use_pressure_differential_features=False, use_categorical_embeddings=False, seed=None):
         """
         Initialize WADI dataset.
         
@@ -64,7 +64,7 @@ class WADIDataset(Dataset):
         self.complex = wadi_complex.get_complex()
         
         # Remove first 21600 points (6 hours) from training data for WADI stabilization (like SWAT)
-        stabilization_point = 21600
+        stabilization_point = 2160
         if len(self.data) > stabilization_point:
             print(f"Removing first {stabilization_point} data points (6 hours) for WADI stabilization")
             self.data = self.data.iloc[stabilization_point:].reset_index(drop=True)
@@ -81,6 +81,7 @@ class WADIDataset(Dataset):
         self.use_first_order_differences = use_first_order_differences
         self.use_first_order_differences_edges = use_first_order_differences_edges
         self.use_pressure_differential_features = use_pressure_differential_features
+        self.use_categorical_embeddings = use_categorical_embeddings
         self.seed = seed
         
         # Set seed if provided
@@ -92,11 +93,17 @@ class WADIDataset(Dataset):
         print(f"Using enhanced 2-cell features: {use_enhanced_2cell_features}")
         print(f"Using first-order differences (0-cells): {use_first_order_differences}")
         print(f"Using first-order differences (1-cells): {use_first_order_differences_edges}")
+        print(f"Using categorical embeddings: {use_categorical_embeddings}")
         if seed is not None:
             print(f"Using seed: {seed}")
         
         # Set feature dimensions based on configuration
         # Determine actual 0-cell feature dimension based on normalization method and first-order differences
+        # Note: Categorical embeddings are added by the model during forward pass, not in dataset
+        if self.use_categorical_embeddings:
+            # Categorical embeddings add 8 dimensions to the base feature vector
+            self.categorical_embedding_dim = 8
+        
         if normalization_method == "standard":
             base_feature_dim_0 = 3  # Original 3D features
         else:
@@ -160,7 +167,10 @@ class WADIDataset(Dataset):
         elif normalization_method == "minmax":
             self.x_0 = self._compute_minmax_x0()
         elif normalization_method == "minmax_proper":
-            self.x_0 = self._compute_minmax_proper_x0()
+            if self.use_categorical_embeddings:
+                self.x_0 = self._compute_categorical_embedding_x0()
+            else:
+                self.x_0 = self._compute_minmax_proper_x0()
         else:
             raise ValueError(f"Unknown normalization method: {normalization_method}")
         
@@ -265,10 +275,15 @@ class WADIDataset(Dataset):
     def compute_initial_x0(self):
         """Compute initial 0-cell features based on normalization method."""
         print(f"Computing 0-cell features with normalization method: {self.normalization_method}")
+        print(f"DEBUG: use_categorical_embeddings = {self.use_categorical_embeddings}")
         if self.use_first_order_differences:
             print("Including first-order differences (lag-1) in features")
             
-        if self.normalization_method == "standard":
+        # Check if categorical embeddings are enabled
+        if self.use_categorical_embeddings:
+            print("DEBUG: Using categorical embedding method")
+            return self._compute_categorical_embedding_x0()
+        elif self.normalization_method == "standard":
             return self._compute_standard_x0()
         elif self.normalization_method == "z_normalization":
             return self._compute_z_normalized_x0()
@@ -279,6 +294,7 @@ class WADIDataset(Dataset):
         elif self.normalization_method == "minmax":
             return self._compute_minmax_x0()
         elif self.normalization_method == "minmax_proper":
+            print("DEBUG: Using minmax_proper method")
             return self._compute_minmax_proper_x0()
         else:
             raise ValueError(f"Unknown normalization method: {self.normalization_method}")
@@ -724,6 +740,90 @@ class WADIDataset(Dataset):
         if self.use_first_order_differences:
             print(f"  Dimension 0: Proper MinMax normalized values (0-1 range)")
             print(f"  Dimension 1: First-order differences (lag-1)")
+        
+        return features
+
+    def _compute_categorical_embedding_x0(self):
+        """
+        Compute 0-cell features with categorical embeddings for sensor/actuator types.
+        
+        Feature vector structure:
+        - Dimension 0: MinMax normalized value
+        - Dimension 1: First-order difference (if enabled)
+        - The model will add categorical embeddings during forward pass
+        """
+        print("Computing 0-cell features with categorical embeddings...")
+        
+        num_samples = len(self.data)
+        num_components = len(self.columns)
+        
+        # Only create original features (2 dimensions) - embeddings added by model
+        total_feature_dim = 2  # normalized_value + first_order_diff
+        
+        # Initialize tensor for 0-cell features
+        features = torch.zeros((num_samples, num_components, total_feature_dim))
+        
+        # Create type mapping for all components
+        type_mapping = {}
+        type_ids = []
+        
+        for i, col in enumerate(self.columns):
+            sensor_type, category, type_id = classify_wadi_sensor_type(col)
+            type_mapping[col] = (sensor_type, category, type_id)
+            type_ids.append(type_id)
+            print(f"  {col}: {sensor_type} ({category}) -> type_id {type_id}")
+        
+        # Store type information for later use
+        self.type_mapping = type_mapping
+        self.type_ids = torch.tensor(type_ids, dtype=torch.long)
+        
+        # Compute MinMax normalization parameters (training data only)
+        if hasattr(self, 'train_min_vals') and hasattr(self, 'train_max_vals'):
+            # Use pre-computed parameters (validation/test)
+            min_vals = self.train_min_vals
+            max_vals = self.train_max_vals
+            print("Using pre-computed MinMax parameters")
+        else:
+            # Compute parameters (training)
+            min_vals = []
+            max_vals = []
+            for col in self.columns:
+                values = self.data[col].values
+                min_vals.append(np.min(values))
+                max_vals.append(np.max(values))
+            self.train_min_vals = min_vals
+            self.train_max_vals = max_vals
+            print("Computed new MinMax parameters from training data")
+        
+        # Process each component
+        for i, col in enumerate(self.columns):
+            values = self.data[col].values
+            sensor_type, category, type_id = type_mapping[col]
+            
+            # MinMax normalization
+            min_val = min_vals[i]
+            max_val = max_vals[i]
+            if max_val == min_val:
+                normalized_values = np.zeros_like(values)
+            else:
+                normalized_values = (values - min_val) / (max_val - min_val)
+            
+            # Store normalized value in dimension 0
+            features[:, i, 0] = torch.tensor(normalized_values, dtype=torch.float32)
+            
+            # Compute first-order differences if enabled
+            if self.use_first_order_differences:
+                differences = np.zeros_like(values)
+                differences[1:] = values[1:] - values[:-1]
+                # Normalize differences using the same MinMax parameters
+                if max_val != min_val:
+                    normalized_differences = (differences - np.min(differences)) / (np.max(differences) - np.min(differences) + 1e-8)
+                else:
+                    normalized_differences = np.zeros_like(differences)
+                features[:, i, 1] = torch.tensor(normalized_differences, dtype=torch.float32)
+        
+        print(f"Computed 0-cell features with shape: {features.shape}")
+        print(f"Feature dimensions: [normalized_value, first_order_diff] - embeddings added by model")
         
         return features
 

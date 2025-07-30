@@ -414,6 +414,7 @@ def run_experiment(config):
             use_first_order_differences=use_first_order_differences,
             use_first_order_differences_edges=use_first_order_differences_edges,
             use_pressure_differential_features=use_pressure_differential_features,
+            use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
             seed=config.get('seed', 42)
         )
         
@@ -435,6 +436,7 @@ def run_experiment(config):
                 use_first_order_differences=use_first_order_differences,
                 use_first_order_differences_edges=use_first_order_differences_edges,
                 use_pressure_differential_features=use_pressure_differential_features,
+                use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
                 seed=config.get('seed', 42)
             )
             
@@ -444,6 +446,8 @@ def run_experiment(config):
             validation_dataset.expected_feature_count = expected_feature_count
             
             # Recompute features with shared parameters
+            # Ensure validation dataset uses the same method as training dataset
+            validation_dataset.use_categorical_embeddings = train_dataset.use_categorical_embeddings
             validation_dataset.x_0 = validation_dataset.compute_initial_x0()
             validation_dataset.x_1 = validation_dataset.compute_initial_x1()
             validation_dataset.x_2 = validation_dataset.compute_initial_x2()
@@ -466,6 +470,7 @@ def run_experiment(config):
             use_first_order_differences=use_first_order_differences,
             use_first_order_differences_edges=use_first_order_differences_edges,
             use_pressure_differential_features=use_pressure_differential_features,
+            use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
             seed=config.get('seed', 42)
         )
         
@@ -475,6 +480,8 @@ def run_experiment(config):
         test_dataset.expected_feature_count = expected_feature_count
         
         # Recompute features with shared parameters
+        # Ensure test dataset uses the same method as training dataset
+        test_dataset.use_categorical_embeddings = train_dataset.use_categorical_embeddings
         test_dataset.x_0 = test_dataset.compute_initial_x0()
         test_dataset.x_1 = test_dataset.compute_initial_x1()
         test_dataset.x_2 = test_dataset.compute_initial_x2()
@@ -496,6 +503,7 @@ def run_experiment(config):
             use_first_order_differences=use_first_order_differences,
             use_first_order_differences_edges=use_first_order_differences_edges,
             use_pressure_differential_features=use_pressure_differential_features,
+            use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
             seed=config.get('seed', 42)
         )
         
@@ -514,6 +522,7 @@ def run_experiment(config):
             use_first_order_differences=use_first_order_differences,
             use_first_order_differences_edges=use_first_order_differences_edges,
             use_pressure_differential_features=use_pressure_differential_features,
+            use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
             seed=config.get('seed', 42)
         ) if not validation_data.empty else None
         
@@ -532,6 +541,7 @@ def run_experiment(config):
             use_first_order_differences=use_first_order_differences,
             use_first_order_differences_edges=use_first_order_differences_edges,
             use_pressure_differential_features=use_pressure_differential_features,
+            use_categorical_embeddings=config.get('data', {}).get('use_categorical_embeddings', False),
             seed=config.get('seed', 42)
         )
         # Ensure test dataset matches training feature count
@@ -588,11 +598,30 @@ def run_experiment(config):
         channels_per_layer, 
         original_feature_dims=original_feature_dims,
         temporal_mode=config['data']['temporal_mode'],
-        n_input=config['model'].get('n_input', 10) # Get n_input safely
+        n_input=config['model'].get('n_input', 10), # Get n_input safely
+        use_enhanced_decoders=config['model'].get('use_enhanced_decoders', False),
+        use_categorical_embeddings=config['model'].get('use_categorical_embeddings', False),
+        num_sensor_types=config['model'].get('num_sensor_types', 12),
+        categorical_embedding_dim=config['model'].get('categorical_embedding_dim', 8)
     )
+
+    # Ensure model is properly initialized on device
+    print(f"Model created. Moving to device: {device}")
+    model = model.to(device)
 
     # Create trainer with validation dataloader
     print("Creating trainer with validation set for thresholding...")
+    
+    # Ensure proper device initialization
+    if str(device).startswith('cuda'):
+        import torch.cuda
+        if not torch.cuda.is_available():
+            print("WARNING: CUDA requested but not available. Falling back to CPU.")
+            device = torch.device('cpu')
+        else:
+            # Initialize CUDA context
+            torch.cuda.empty_cache()
+            print(f"CUDA initialized in pipeline. Using device: {device}")
     
     # Correction: Rename 'method' key from config to 'evaluation_method' for trainer
     eval_config = config.get('evaluation', {})

@@ -3,7 +3,39 @@ import torch
 from torch import nn
 from topomodelx.nn.combinatorial.hmc import HMC
 
-from src.models.common import ResidualDecoder, TemporalConvNet
+from src.models.common import ResidualDecoder, EnhancedResidualDecoder, MultiScaleDecoder, TemporalConvNet
+
+
+class ResidualHMC(nn.Module):
+    """
+    HMC wrapper that adds residual connections for better gradient flow.
+    """
+    def __init__(self, channels_per_layer, negative_slope=0.2):
+        super().__init__()
+        self.hmc = HMC(
+            channels_per_layer=channels_per_layer,
+            negative_slope=negative_slope
+        )
+        self.use_residual = True
+        print(f"Initialized ResidualHMC with {len(channels_per_layer)} layers")
+    
+    def forward(self, x_0, x_1, x_2, a0, a1, coa2, b1, b2):
+        # Store initial inputs for residual connections
+        x_0_init, x_1_init, x_2_init = x_0, x_1, x_2
+        
+        # Apply HMC
+        h_0, h_1, h_2 = self.hmc(x_0, x_1, x_2, a0, a1, coa2, b1, b2)
+        
+        # Add residual connections if dimensions match
+        if self.use_residual:
+            if h_0.shape[-1] == x_0_init.shape[-1]:
+                h_0 = h_0 + x_0_init
+            if h_1.shape[-1] == x_1_init.shape[-1]:
+                h_1 = h_1 + x_1_init
+            if h_2.shape[-1] == x_2_init.shape[-1]:
+                h_2 = h_2 + x_2_init
+        
+        return h_0, h_1, h_2
 
 
 class AnomalyCCANN(nn.Module):
@@ -12,7 +44,7 @@ class AnomalyCCANN(nn.Module):
     Uses either an autoencoder approach to reconstruct features, or a temporal approach
     to predict the next timestep's features.
     """
-    def __init__(self, channels_per_layer, original_feature_dims, temporal_mode=False, use_tcn=False, n_input=10):
+    def __init__(self, channels_per_layer, original_feature_dims, temporal_mode=False, use_tcn=False, n_input=10, use_enhanced_decoders=False, use_categorical_embeddings=False, num_sensor_types=12, categorical_embedding_dim=8):
         """
         Initialize the anomaly detection model.
         
@@ -29,12 +61,18 @@ class AnomalyCCANN(nn.Module):
             Whether to use TCN instead of LSTM for temporal mode
         n_input : int, default=10
             Number of input timesteps for temporal mode
+        use_enhanced_decoders : bool, default=False
+            Whether to use enhanced decoders with skip connections
         """
         super().__init__()
         self.temporal_mode = temporal_mode
         self.use_tcn = use_tcn
         self.n_input = n_input
         self.original_feature_dims = original_feature_dims
+        self.use_enhanced_decoders = use_enhanced_decoders
+        self.use_categorical_embeddings = use_categorical_embeddings
+        self.num_sensor_types = num_sensor_types
+        self.categorical_embedding_dim = categorical_embedding_dim
         
         if self.temporal_mode:
             # In temporal mode, an LSTM/TCN first encodes the sequence.
@@ -45,10 +83,10 @@ class AnomalyCCANN(nn.Module):
             encoder_channels = copy.deepcopy(channels_per_layer)
             encoder_channels[0][0] = [self.lstm_hidden_dim] * 3  # HMC input must match LSTM hidden dim
 
-            self.encoder = HMC(
+            self.encoder = ResidualHMC(
                 channels_per_layer=encoder_channels
             )
-            print(f"Initialized AnomalyCCANN with LSTM->HMC architecture. LSTM hidden: {self.lstm_hidden_dim}")
+            print(f"Initialized AnomalyCCANN with LSTM->ResidualHMC architecture. LSTM hidden: {self.lstm_hidden_dim}")
 
             if self.use_tcn:
                 # This path is not fully implemented for the new architecture yet
@@ -72,17 +110,41 @@ class AnomalyCCANN(nn.Module):
             
             print(f"Creating deeper temporal decoders: input_dim={decoder_input_dim}, hidden_dim={decoder_hidden_dim}, layers={decoder_layers}")
             
-            self.decoder_x0 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['0'], n_layers=decoder_layers)
-            self.decoder_x1 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['1'], n_layers=decoder_layers)
-            self.decoder_x2 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['2'], n_layers=decoder_layers)
+            if self.use_enhanced_decoders:
+                self.decoder_x0 = EnhancedResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['0'], n_layers=decoder_layers)
+                self.decoder_x1 = EnhancedResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['1'], n_layers=decoder_layers)
+                self.decoder_x2 = EnhancedResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['2'], n_layers=decoder_layers)
+            else:
+                self.decoder_x0 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['0'], n_layers=decoder_layers)
+                self.decoder_x1 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['1'], n_layers=decoder_layers)
+                self.decoder_x2 = ResidualDecoder(input_dim=decoder_input_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['2'], n_layers=decoder_layers)
 
         else: # Reconstruction mode
-            print(f"Using reconstruction mode")
+            print(f"Using reconstruction mode with enhanced decoders: {use_enhanced_decoders}")
             print(f"Feature dimensions: 0-cells={original_feature_dims['0']}, 1-cells={original_feature_dims['1']}, 2-cells={original_feature_dims['2']}")
-            self.encoder = HMC(
-                channels_per_layer=channels_per_layer,
-                negative_slope = 0.2
-            )
+            
+            # Add categorical embedding layer if enabled
+            if self.use_categorical_embeddings:
+                self.categorical_embedding = nn.Embedding(num_sensor_types, categorical_embedding_dim)
+                nn.init.xavier_uniform_(self.categorical_embedding.weight)
+                print(f"Added categorical embedding layer: {num_sensor_types} types -> {categorical_embedding_dim}D")
+                
+                # Create enhanced channel configuration for HMC
+                enhanced_channels = copy.deepcopy(channels_per_layer)
+                enhanced_input_dim = original_feature_dims['0'] + categorical_embedding_dim
+                enhanced_channels[0][0] = [enhanced_input_dim, channels_per_layer[0][0][1], channels_per_layer[0][0][2]]  # Only enhance 0-cells
+                print(f"Enhanced HMC channels: {enhanced_channels}")
+                print(f"Embeddings will enhance {original_feature_dims['0']}D features to {enhanced_input_dim}D for encoding")
+                
+                self.encoder = ResidualHMC(
+                    channels_per_layer=enhanced_channels,
+                    negative_slope = 0.2
+                )
+            else:
+                self.encoder = ResidualHMC(
+                    channels_per_layer=channels_per_layer,
+                    negative_slope = 0.2
+                )
             encoder_output_dim = channels_per_layer[-1][-1][-1]
             
             # Create deeper decoders with more capacity for nonlinear reconstruction
@@ -91,9 +153,16 @@ class AnomalyCCANN(nn.Module):
             
             print(f"Creating deeper decoders: input_dim={encoder_output_dim}, hidden_dim={decoder_hidden_dim}, layers={decoder_layers}")
             
-            self.decoder_x0 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['0'], n_layers=decoder_layers)
-            self.decoder_x1 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['1'], n_layers=decoder_layers)
-            self.decoder_x2 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['2'], n_layers=decoder_layers)
+            if self.use_enhanced_decoders:
+                print("Using EnhancedResidualDecoder with multiple skip connections")
+                self.decoder_x0 = EnhancedResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['0'], n_layers=decoder_layers)
+                self.decoder_x1 = EnhancedResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['1'], n_layers=decoder_layers)
+                self.decoder_x2 = EnhancedResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['2'], n_layers=decoder_layers)
+            else:
+                print("Using standard ResidualDecoder")
+                self.decoder_x0 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['0'], n_layers=decoder_layers)
+                self.decoder_x1 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['1'], n_layers=decoder_layers)
+                self.decoder_x2 = ResidualDecoder(input_dim=encoder_output_dim, hidden_dim=decoder_hidden_dim, output_dim=original_feature_dims['2'], n_layers=decoder_layers)
 
     def forward(self, *args, **kwargs):
         # Correctly dispatch based on the mode
@@ -109,7 +178,7 @@ class AnomalyCCANN(nn.Module):
             # In reconstruction mode, we expect positional arguments. Pass them through.
             return self.forward_original(*args, **kwargs)
 
-    def forward_original(self, x_0_batch, x_1_batch, x_2_batch, a0, a1, coa2, b1, b2):
+    def forward_original(self, x_0_batch, x_1_batch, x_2_batch, a0, a1, coa2, b1, b2, type_ids=None):
         """
         Batched forward pass for reconstruction mode.
         This loops through the batch because the underlying topomodelx layers do not
@@ -132,11 +201,39 @@ class AnomalyCCANN(nn.Module):
             x_1 = x_1_batch[i]
             x_2 = x_2_batch[i]
 
-            # Pass the unbatched (2D) features and static topology matrices to the encoder
-            h_0, h_1, h_2 = self.encoder(x_0, x_1, x_2, a0_static, a1_static, coa2_static, b1_static, b2_static)
+            # Store original features for loss computation (only the first 2 dimensions)
+            x_0_original = x_0[:, :2]  # Only normalized_value + first_order_diff
 
-            # Decode the results
-            x0_reconstructed = self.decoder_x0(h_0)
+            # Apply categorical embeddings if enabled
+            if self.use_categorical_embeddings and type_ids is not None:
+                # Get type IDs for this batch item
+                batch_type_ids = type_ids[i] if type_ids.dim() > 1 else type_ids
+                
+                # Move type IDs to the same device as the model
+                batch_type_ids = batch_type_ids.to(x_0.device)
+                
+                # Validate type IDs are within bounds (only print error if out of bounds)
+                if batch_type_ids.max() >= self.num_sensor_types:
+                    print(f"ERROR: Type ID {batch_type_ids.max().item()} exceeds embedding size {self.num_sensor_types}")
+                    # Clamp to valid range
+                    batch_type_ids = torch.clamp(batch_type_ids, 0, self.num_sensor_types - 1)
+                    print(f"DEBUG: Clamped type IDs to range 0-{self.num_sensor_types - 1}")
+                
+                # Get categorical embeddings
+                embeddings = self.categorical_embedding(batch_type_ids)  # (num_components, embedding_dim)
+                
+                # Create enhanced features by concatenating original features with embeddings
+                # This way embeddings help encoding but aren't reconstructed
+                x_0_enhanced = torch.cat([x_0_original, embeddings], dim=1)  # (num_components, 2 + embedding_dim)
+                
+                # Pass enhanced features to encoder
+                h_0, h_1, h_2 = self.encoder(x_0_enhanced, x_1, x_2, a0_static, a1_static, coa2_static, b1_static, b2_static)
+            else:
+                # Standard encoding without embeddings
+                h_0, h_1, h_2 = self.encoder(x_0, x_1, x_2, a0_static, a1_static, coa2_static, b1_static, b2_static)
+
+            # Decode the results - ONLY reconstruct original features
+            x0_reconstructed = self.decoder_x0(h_0)  # Shape: (num_components, 2) - only original features
             x1_reconstructed = self.decoder_x1(h_1)
             x2_reconstructed = self.decoder_x2(h_2)
 

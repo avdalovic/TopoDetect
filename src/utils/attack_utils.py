@@ -350,6 +350,51 @@ TEP_SUB_MAP = {
 	'Actuators': ['Agitator (MV)']
 }
 
+def classify_wadi_sensor_type(column_name):
+    """
+    Classify WADI sensor/actuator types based on naming conventions.
+    
+    Returns:
+        - sensor_type: str (AIT, FIT, LIT, LS, MV, P, etc.)
+        - category: str (sensor, actuator)
+        - type_id: int (for embedding lookup)
+    """
+    column_upper = column_name.upper()
+    
+    # Sensor types
+    if 'AIT' in column_upper:
+        return 'AIT', 'sensor', 0  # Analyzer/Transmitter (Temperature)
+    elif 'FIT' in column_upper:
+        return 'FIT', 'sensor', 1  # Flow Indicator/Transmitter
+    elif 'LIT' in column_upper or ('LT' in column_upper and 'LIT' not in column_upper):
+        return 'LIT', 'sensor', 2  # Level Indicator/Transmitter
+    elif 'LS' in column_upper:
+        return 'LS', 'sensor', 3   # Level Switch
+    elif 'PIT' in column_upper:
+        return 'PIT', 'sensor', 4  # Pressure Indicator/Transmitter
+    elif 'DPIT' in column_upper:
+        return 'DPIT', 'sensor', 5  # Differential Pressure Indicator/Transmitter
+    elif 'FIC' in column_upper:
+        return 'FIC', 'sensor', 6  # Flow Indicator/Controller
+    elif 'FQ' in column_upper:
+        return 'FQ', 'sensor', 7   # Flow Quantity
+    elif 'PIC' in column_upper:
+        return 'PIC', 'sensor', 8  # Pressure Indicator/Controller
+    
+    # Actuator types
+    elif 'MV' in column_upper and 'STATUS' in column_upper:
+        return 'MV', 'actuator', 9  # Motor Valve
+    elif 'P_' in column_upper and 'STATUS' in column_upper:
+        return 'P', 'actuator', 10  # Pump
+    elif 'MCV' in column_upper:
+        return 'MCV', 'actuator', 11  # Motor Control Valve
+    elif 'SV' in column_upper and 'STATUS' in column_upper:
+        return 'SV', 'actuator', 12  # Solenoid Valve
+    
+    # Default fallback
+    else:
+        return 'UNKNOWN', 'sensor', 13
+
 def is_actuator(dataset, label):
 	
 	if dataset == 'SWAT':

@@ -64,11 +64,26 @@ class AnomalyTrainer:
         """
         Initialize the trainer with additional training options.
         """
+        # Ensure proper CUDA initialization
+        if str(device).startswith('cuda'):
+            import torch.cuda
+            if not torch.cuda.is_available():
+                print("WARNING: CUDA requested but not available. Falling back to CPU.")
+                device = torch.device('cpu')
+            else:
+                # Initialize CUDA context
+                torch.cuda.empty_cache()
+                print(f"CUDA initialized. Using device: {device}")
+        
+        self.device = device
         self.model = model.to(device)
+        
+        # Ensure model is in training mode
+        self.model.train()
+        
         self.train_dataloader = train_dataloader
         self.validation_dataloader = validation_dataloader
         self.test_dataloader = test_dataloader
-        self.device = device
         
         # Dataset-specific parameters
         self.dataset_name = dataset_name
@@ -134,6 +149,15 @@ class AnomalyTrainer:
         print(f"  effective_sample_hz: {self.original_sample_hz * self.sample_rate:.4f}")
         print(f"  fp_alarm_window: {self.fp_alarm_window}s -> {int(self.fp_alarm_window * self.original_sample_hz * self.sample_rate)} points")
         print(f"  temporal_consistency: {self.temporal_consistency} (require {self.temporal_consistency} consecutive anomalies)")
+        
+        # Print categorical embedding configuration
+        if hasattr(self.model, 'use_categorical_embeddings') and self.model.use_categorical_embeddings:
+            print(f"🚀 Categorical Embeddings ENABLED:")
+            print(f"  - Number of sensor types: {self.model.num_sensor_types}")
+            print(f"  - Embedding dimension: {self.model.categorical_embedding_dim}")
+            print(f"  - Embeddings will enhance features during encoding but won't be reconstructed")
+        else:
+            print(f"❌ Categorical Embeddings DISABLED")
 
     def apply_temporal_consistency(self, raw_prediction):
         """
@@ -228,14 +252,25 @@ class AnomalyTrainer:
                     continue  # Skip this batch
                 
                 # Standard reconstruction training
-                x_0_recon, x_1_recon, x_2_recon = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2)
+                # Get type IDs from dataset if available
+                type_ids = None
+                if hasattr(self.train_dataloader.dataset, 'type_ids'):
+                    type_ids = self.train_dataloader.dataset.type_ids
+                
+                x_0_recon, x_1_recon, x_2_recon = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2, type_ids)
                 
                 # Check for NaN/inf in predictions
                 if torch.any(torch.isnan(x_0_recon)) or torch.any(torch.isinf(x_0_recon)):
                     print(f"WARNING: NaN/inf detected in x_0_recon at batch {i}")
                     continue  # Skip this batch
                 
-                loss_0 = self.crit(x_0_recon, x_0).mean()
+                # For categorical embeddings, only compute loss on original features (first 2 dimensions)
+                if hasattr(self.model, 'use_categorical_embeddings') and self.model.use_categorical_embeddings:
+                    x_0_original = x_0[:, :, :2]  # Only normalized_value + first_order_diff
+                    loss_0 = self.crit(x_0_recon, x_0_original).mean()
+                else:
+                    loss_0 = self.crit(x_0_recon, x_0).mean()
+                
                 loss_1 = self.crit(x_1_recon, x_1).mean()
                 loss_2 = self.crit(x_2_recon, x_2).mean()
                 loss = loss_0 + loss_1 + loss_2
@@ -322,13 +357,23 @@ class AnomalyTrainer:
                         if batch_count <= 3:
                             print(f"DEBUG: Temporal residuals_0 shape: {residuals_0.shape}")
                     else:
-                        x_0, x_1, x_2, _, _, _, _, _, _ = self.to_device(sample)
+                        x_0, x_1, x_2, a0, a1, coa2, b1, b2, _ = self.to_device(sample)
+                        
+                        # Get type IDs from dataset if available
+                        type_ids = None
+                        if hasattr(self.validation_dataloader.dataset, 'type_ids'):
+                            type_ids = self.validation_dataloader.dataset.type_ids
                         
                         # Standard reconstruction
-                        x_0_recon, x_1_recon, x_2_recon = self.model(*self.to_device(sample)[:-1])
+                        x_0_recon, x_1_recon, x_2_recon = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2, type_ids)
                         
                         # Use L2 loss consistently (MSE without reduction) for all levels
-                        residuals_0 = self.crit(x_0_recon, x_0)
+                        # For categorical embeddings, only compute loss on original features (first 2 dimensions)
+                        if hasattr(self.model, 'use_categorical_embeddings') and self.model.use_categorical_embeddings:
+                            x_0_original = x_0[:, :, :2]  # Only normalized_value + first_order_diff
+                            residuals_0 = self.crit(x_0_recon, x_0_original)
+                        else:
+                            residuals_0 = self.crit(x_0_recon, x_0)
                         residuals_1 = self.crit(x_1_recon, x_1)
                         residuals_2 = self.crit(x_2_recon, x_2)
                         
@@ -607,13 +652,23 @@ class AnomalyTrainer:
                         detailed_level_predictions[level].extend(batch_level_preds[level])
                     
                 else: # Reconstruction - evaluate on all 3 levels
-                    x_0, x_1, x_2, _, _, _, _, _, _ = self.to_device(sample)
+                    x_0, x_1, x_2, a0, a1, coa2, b1, b2, _ = self.to_device(sample)
+                    
+                    # Get type IDs from dataset if available
+                    type_ids = None
+                    if hasattr(dataloader.dataset, 'type_ids'):
+                        type_ids = dataloader.dataset.type_ids
                     
                     # Standard reconstruction
-                    x_0_recon, x_1_recon, x_2_recon = self.model(*self.to_device(sample)[:-1])
+                    x_0_recon, x_1_recon, x_2_recon = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2, type_ids)
                     
                     # Use L2 loss consistently for all levels
-                    residuals_0 = self.crit(x_0_recon, x_0)
+                    # For categorical embeddings, only compute loss on original features (first 2 dimensions)
+                    if hasattr(self.model, 'use_categorical_embeddings') and self.model.use_categorical_embeddings:
+                        x_0_original = x_0[:, :, :2]  # Only normalized_value + first_order_diff
+                        residuals_0 = self.crit(x_0_recon, x_0_original)
+                    else:
+                        residuals_0 = self.crit(x_0_recon, x_0)
                     residuals_1 = self.crit(x_1_recon, x_1)
                     residuals_2 = self.crit(x_2_recon, x_2)
                     
@@ -1309,6 +1364,21 @@ class AnomalyTrainer:
         Main training loop with validation, testing, and early stopping.
         """
         print(f"\n--- Starting Training for {num_epochs} epochs ---")
+        
+        # Debug: Check if using enhanced decoders
+        if hasattr(self.model, 'use_enhanced_decoders') and self.model.use_enhanced_decoders:
+            print(f"🔗 Using Enhanced Skip Connections (ResidualHMC + EnhancedResidualDecoder)")
+            print(f"   - ResidualHMC: Adds skip connections to HMC layers")
+            print(f"   - EnhancedResidualDecoder: Multiple skip connections for better gradient flow")
+            
+            # Debug: Print model architecture details
+            if hasattr(self.model, 'encoder') and hasattr(self.model.encoder, 'input_dims'):
+                print(f"   - HMC Input dims: {self.model.encoder.input_dims}")
+                print(f"   - HMC Output dims: {self.model.encoder.output_dims}")
+                print(f"   - Skip projections: {[type(proj).__name__ for proj in self.model.encoder.skip_projections]}")
+        else:
+            print(f"📊 Using Standard Architecture (HMC + ResidualDecoder)")
+        
         os.makedirs(checkpoint_dir, exist_ok=True)
         best_f1 = -1.0
         epochs_no_improve = 0

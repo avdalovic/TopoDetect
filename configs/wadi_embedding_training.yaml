@@ -1,0 +1,36 @@
+# WADI Embedding Training Configuration
+# For training node embeddings using train_embeddings.py
+
+seed: 42
+
+# Data configuration
+data:
+  data_dir: "data/WADI"
+  train_path: "WADI_train.csv"
+  test_path: "WADI_test.csv"
+  sample_rate: 0.01  # Use 1% for fast embedding training
+  validation_split_ratio: 0.2
+  temporal_mode: false
+  temporal_sample_rate: 1
+  normalization_method: "mixed_normalization"
+  use_enhanced_2cell_features: true
+  use_first_order_differences: true
+  use_first_order_differences_edges: false
+  use_pressure_differential_features: false
+
+# Topology configuration
+topology:
+  use_geco_relationships: false
+  use_geco_features: false
+
+# Training configuration
+training:
+  batch_size: 256  # Larger batch for speed
+  learning_rate: 0.001
+  weight_decay: 1e-4
+
+# Embedding configuration
+embedding_dim: 64
+top_k: 10
+embedding_epochs: 20  # Fewer epochs for speed
+temperature: 1.0 
