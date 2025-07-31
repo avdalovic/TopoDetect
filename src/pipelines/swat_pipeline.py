@@ -349,15 +349,48 @@ def run_experiment(config):
             validation_split_ratio=config['data']['validation_split_ratio']
         )
 
-    # Load SWAT topology with optional GECO features
+    # Load SWAT topology with optional GECO features and pure embedding support
     print("Loading SWAT topology...")
     use_geco_relationships = config.get('topology', {}).get('use_geco_relationships', False)
-    swat_complex = SWATComplex(use_geco_relationships=use_geco_relationships)
+    use_pure_embedding = config.get('topology', {}).get('use_pure_embedding', False)
     
-    if use_geco_relationships:
-        print("Using GECO-learned relationships from SWaT.model")
+    if use_pure_embedding:
+        print("🧠 Using Pure Embedding Topology (NO GECO)")
+        from src.utils.topology.pure_embedding_topology import create_pure_embedding_swat_complex
+        
+        embeddings_file = config.get('embedding', {}).get('embeddings_file', 'embeddings/swat_embeddings.pkl')
+        similarity_threshold = config.get('topology', {}).get('embedding_similarity_threshold', 0.3)
+        min_edges_per_node = config.get('topology', {}).get('min_edges_per_node', 3)
+        
+        print(f"  📊 Embeddings file: {embeddings_file}")
+        print(f"  🎯 Similarity threshold: {similarity_threshold}")
+        print(f"  🔗 Min edges per node: {min_edges_per_node}")
+        
+        pure_complex = create_pure_embedding_swat_complex(
+            embeddings_file=embeddings_file,
+            similarity_threshold=similarity_threshold,
+            min_edges_per_node=min_edges_per_node
+        )
+        
+        # Create a wrapper object to match SWaTDataset expectations
+        class PureEmbeddingWrapper:
+            def __init__(self, complex):
+                self._complex = complex
+            def get_complex(self):
+                return self._complex
+            def _get_node_index_map(self):
+                """Helper to create a mapping from component name to its index in the complex."""
+                row_dict_01, _, _ = self._complex.incidence_matrix(0, 1, index=True)
+                return {list(k)[0]: v for k, v in row_dict_01.items()}
+        
+        swat_complex = PureEmbeddingWrapper(pure_complex)
     else:
-        print("Using manually defined relationships")
+        swat_complex = SWATComplex(use_geco_relationships=use_geco_relationships)
+        
+        if use_geco_relationships:
+            print("Using GECO-learned relationships from SWaT.model")
+        else:
+            print("Using manually defined relationships")
 
     # Get component names
     component_names = [col for col in train_data.columns if col not in ['Timestamp', 'Normal/Attack']]
@@ -458,11 +491,16 @@ def run_experiment(config):
     channels_per_layer[0][0] = in_channels
     print(f"Dynamically updated model input channels to: {in_channels}")
 
+    # Get enhanced decoders parameter
+    use_enhanced_decoders = config.get('model', {}).get('use_enhanced_decoders', False)
+    print(f"Using enhanced decoders: {use_enhanced_decoders}")
+    
     model = AnomalyCCANN(
         channels_per_layer, 
         original_feature_dims=original_feature_dims,
         temporal_mode=temporal_mode,
-        n_input=config['model'].get('n_input', 10) # Get n_input safely
+        n_input=config['model'].get('n_input', 10), # Get n_input safely
+        use_enhanced_decoders=use_enhanced_decoders
     )
 
     # Create trainer with validation dataloader
@@ -487,6 +525,12 @@ def run_experiment(config):
         'theta_r': enhanced_metrics_config.get('theta_r', 0.1),
         'original_sample_hz': enhanced_metrics_config.get('original_sample_hz', 1)
     })
+    
+    # Remove any parameters that might be in eval_config that AnomalyTrainer doesn't accept
+    unwanted_params = ['metrics', 'save_predictions', 'save_reconstruction_errors']
+    for param in unwanted_params:
+        if param in eval_config:
+            eval_config.pop(param)
         
     trainer = AnomalyTrainer(
         model,

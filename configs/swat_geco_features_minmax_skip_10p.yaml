@@ -1,0 +1,85 @@
+# SWAT GECO Relationships + GECO Features + Proper MinMax + Skip Connections Experiment
+# Testing GECO-learned relationships AND features with proper MinMax normalization and enhanced skip connections
+# Using 10% of data for faster experimentation
+
+seed: 42
+
+project_name: "SWAT_TopoDetect"
+entity: "avdalovica"
+experiment_name: "swat_geco_features_minmax_skip_10p"
+dataset_name: "SWAT"
+
+# System configuration
+system:
+  device: "cuda"
+  checkpoint_dir: "checkpoints"
+
+# Data configuration - 10% SAMPLE FOR TESTING
+data:
+  data_dir: "data/SWAT"
+  train_path: "SWATv0_train.csv"
+  test_path: "SWATv0_test.csv"
+  sample_rate: 0.1  # 🚀 10% for better performance
+  validation_split_ratio: 0.2
+  temporal_mode: false
+  temporal_sample_rate: 1
+  normalization_method: "minmax_proper"  # ✅ Proper MinMax normalization (MinMaxScaler approach)
+  use_enhanced_2cell_features: true  # ✅ Enhanced 2-cell features
+  use_first_order_differences: true  # ✅ Include first-order differences
+  use_first_order_differences_edges: false  # ❌ NO differences for edges (cleaner)
+  use_flow_balance_features: false  # ❌ NO flow balance features for now
+
+# Topology configuration - GECO RELATIONSHIPS + FEATURES
+topology:
+  use_geco_relationships: true   # ✅ Use GECO-learned relationships from SWAT.model
+  use_geco_features: true        # ✅ Use GECO features (strength, error, etc.)
+  use_pure_embedding: false      # ❌ NO pure embedding
+
+# Model configuration - ENHANCED SKIP CONNECTIONS
+model:
+  name: "AnomalyCCANN"
+  channels_per_layer:
+    - [[2, 3, 4], [32, 32, 32], [64, 64, 64]]  # Base dimensions (will be enhanced by pipeline)
+  original_feature_dims:
+    "0": 2  # 0-cells: Proper MinMax normalized value + first-order difference
+    "1": 3  # 1-cells: concatenated Proper MinMax values + 1D GECO feature
+    "2": 4  # 2-cells: enhanced features (sensor mean/std, actuator median/range)
+  use_enhanced_decoders: true  # 🚀 Enable enhanced skip connections
+
+# Training configuration
+training:
+  epochs: 5  # Moderate epochs for testing
+  batch_size: 1
+  learning_rate: 0.001
+  weight_decay: 1e-4
+  grad_clip_value: 1.0
+  test_interval: 1
+  early_stopping:
+    enabled: true
+    patience: 5
+    min_delta: 0.001
+  reduce_lr_patience: 3
+  reduce_lr_factor: 0.7
+  min_lr: 1e-5
+
+# Anomaly detection
+anomaly_detection:
+  threshold_method: "validation"  # Use validation data for threshold
+  threshold_percentile: 99
+  evaluation_method: "threshold"
+  use_two_threshold_alarm: false
+  temporal_consistency: 1
+
+# Evaluation
+evaluation:
+  metrics: ["f1", "precision", "recall", "auc"]
+  fp_alarm_window_seconds: 60
+  save_predictions: true
+  save_reconstruction_errors: true
+
+# Logging
+logging:
+  use_wandb: true
+  log_interval: 2
+  save_model: true
+  verbose: true 
