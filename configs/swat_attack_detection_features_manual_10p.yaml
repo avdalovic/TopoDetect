@@ -1,0 +1,81 @@
+# SWAT Attack Detection Features Experiment - MANUAL VERSION
+# Testing attack-specific 2-cell features with manual topology relationships
+# Using 10% of data for better evaluation
+
+seed: 42
+
+project_name: "SWAT_TopoDetect"
+entity: "avdalovica"
+experiment_name: "swat_attack_detection_features_manual_10p"
+dataset_name: "SWAT"
+
+# System configuration
+system:
+  device: "cuda"
+  checkpoint_dir: "checkpoints"
+
+# Data configuration - 10% SAMPLE FOR BETTER EVALUATION
+data:
+  data_dir: "data/SWAT"
+  train_path: "SWATv0_train.csv"
+  test_path: "SWATv0_test.csv"
+  sample_rate: 0.1  # 10% for better evaluation
+  validation_split_ratio: 0.2
+  temporal_mode: false
+  temporal_sample_rate: 1
+  normalization_method: "mixed_normalization"  # Z-norm for sensors, min-max for actuators
+  use_enhanced_2cell_features: true  # Enable attack-specific features
+  use_first_order_differences: false  # Disable for simplicity
+  use_first_order_differences_edges: false
+  use_attack_detection_features: true  # Enable attack-specific features
+
+# Topology configuration - MANUAL RELATIONSHIPS
+topology:
+  use_geco_relationships: false  # Use manually defined relationships
+  use_geco_features: false       # NO GECO features
+  use_pure_embedding: false      # NO pure embedding
+
+# Model configuration - ATTACK DETECTION FEATURES
+model:
+  name: "AnomalyCCANN"
+  channels_per_layer:
+    - [[1, 2, 7], [32, 32, 32], [64, 64, 64]]  # 7D attack detection features for 2-cells
+  original_feature_dims:
+    "0": 1   # 0-cells: 1D normalized values
+    "1": 2   # 1-cells: 2D concatenated values
+    "2": 7   # 2-cells: 7D attack detection features
+  use_enhanced_decoders: false  # Disable for testing
+
+# Training configuration
+training:
+  epochs: 5  # More epochs for better evaluation
+  batch_size: 64  # Standard batch size
+  learning_rate: 0.001  # Standard learning rate
+  weight_decay: 1e-4
+  grad_clip_value: 1.0
+  test_interval: 1
+  early_stopping:
+    enabled: true
+    patience: 5
+    min_delta: 1e-4
+
+# Anomaly detection
+anomaly_detection:
+  threshold_method: "percentile"  # Use percentile like working config
+  threshold_percentile: 99.0
+  evaluation_method: "threshold"
+  use_two_threshold_alarm: false
+  temporal_consistency: 3
+
+# Evaluation
+evaluation:
+  metrics: ["f1", "precision", "recall", "auc"]
+  save_predictions: true
+  save_reconstruction_errors: true
+
+# Logging
+logging:
+  use_wandb: true
+  log_interval: 5
+  save_model: true
+  verbose: true 

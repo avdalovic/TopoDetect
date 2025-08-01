@@ -11,7 +11,8 @@ class SWaTDataset(Dataset):
     """Dataset class for SWAT anomaly detection."""
     def __init__(self, data, swat_complex, feature_dim_0=3, n_input=10, temporal_mode=False, temporal_sample_rate=1, use_geco_features=False, 
                  normalization_method="standard", use_enhanced_2cell_features=False, use_first_order_differences=False, 
-                 use_first_order_differences_edges=True, use_flow_balance_features=False, seed=None):
+                 use_first_order_differences_edges=True, use_flow_balance_features=False, use_attack_detection_features=False, seed=None, 
+                 train_min_vals=None, train_max_vals=None, train_mean_vals=None, train_std_vals=None):
         """
         Initialize the SWAT dataset for anomaly detection.
 
@@ -43,6 +44,14 @@ class SWaTDataset(Dataset):
             Whether to add flow balance features to PLCs (FIT{X}01 - FIT{X+1}01)
         seed : int, optional
             Random seed for reproducibility
+        train_min_vals : list, optional
+            Pre-computed minimum values for MinMax normalization
+        train_max_vals : list, optional
+            Pre-computed maximum values for MinMax normalization
+        train_mean_vals : list, optional
+            Pre-computed mean values for Z-normalization
+        train_std_vals : list, optional
+            Pre-computed standard deviation values for Z-normalization
         """
         self.data = data
         self.swat_complex = swat_complex  # Store the wrapper object
@@ -57,7 +66,24 @@ class SWaTDataset(Dataset):
         self.use_first_order_differences = use_first_order_differences
         self.use_first_order_differences_edges = use_first_order_differences_edges
         self.use_flow_balance_features = use_flow_balance_features
+        self.use_attack_detection_features = use_attack_detection_features
         self.seed = seed
+        
+        # Store pre-computed normalization parameters if provided
+        if train_min_vals is not None:
+            self.train_min_vals = train_min_vals
+            self.using_precomputed_params = True
+            print(f"Using pre-computed MinMax parameters: {len(train_min_vals)} components")
+        if train_max_vals is not None:
+            self.train_max_vals = train_max_vals
+        if train_mean_vals is not None:
+            self.train_mean_vals = train_mean_vals
+            self.using_precomputed_params = True
+            print(f"Using pre-computed Z-normalization parameters: {len(train_mean_vals)} components")
+        if train_std_vals is not None:
+            self.train_std_vals = train_std_vals
+        else:
+            self.using_precomputed_params = False
         
         # Set seed if provided
         if seed is not None:
@@ -115,17 +141,25 @@ class SWaTDataset(Dataset):
         self.feature_dim_0 = actual_feature_dim_0
         
         # Set 2-cell feature dimensions
-        base_2cell_dim = 4 if use_enhanced_2cell_features else 1
-        if use_flow_balance_features:
-            self.feature_dim_2 = base_2cell_dim + 1  # Add 1D for flow balance
-            print(f"Using 2-cell features with flow balance: {self.feature_dim_2}D")
+        if use_attack_detection_features:
+            self.feature_dim_2 = 7  # 7D attack detection features
+            print(f"Using attack detection 2-cell features: {self.feature_dim_2}D")
         else:
-            self.feature_dim_2 = base_2cell_dim
-            print(f"Using standard 2-cell features: {self.feature_dim_2}D")
+            base_2cell_dim = 4 if use_enhanced_2cell_features else 1
+            if use_flow_balance_features:
+                self.feature_dim_2 = base_2cell_dim + 1  # Add 1D for flow balance
+                print(f"Using 2-cell features with flow balance: {self.feature_dim_2}D")
+            else:
+                self.feature_dim_2 = base_2cell_dim
+                print(f"Using standard 2-cell features: {self.feature_dim_2}D")
         
         # Process data and create features
         self.preprocess_features()
         self.node_index_map = self.swat_complex._get_node_index_map()
+        
+        # Create component to index mapping for attack detection features
+        self.component_to_idx = {comp: i for i, comp in enumerate(self.columns)}
+        
         self.x_0 = self.compute_initial_x0()
         self.x_1 = self.compute_initial_x1()
         self.x_2 = self.compute_initial_x2(self.node_index_map)
@@ -179,6 +213,12 @@ class SWaTDataset(Dataset):
         elif self.normalization_method == "minmax_proper":
             print("DEBUG: Using minmax_proper method")
             return self._compute_minmax_proper_x0()
+        elif self.normalization_method == "z_normalization_proper":
+            print("DEBUG: Using z_normalization_proper method")
+            return self._compute_z_normalization_proper_x0()
+        elif self.normalization_method == "robust_z_normalization":
+            print("DEBUG: Using robust_z_normalization method")
+            return self._compute_robust_z_normalization_x0()
         else:
             raise ValueError(f"Unknown normalization method: {self.normalization_method}")
 
@@ -456,8 +496,8 @@ class SWaTDataset(Dataset):
                 range_val = max_val - min_val
                 
                 if range_val == 0:
-                    normalized_values = np.full_like(values, 0.5, dtype=float)
-                    print(f"  {component}: using training params, constant value={min_val:.4f}, set to 0.5")
+                    normalized_values = np.full_like(values, 0.0, dtype=float)  # Set to lower bound (0.0) like sklearn
+                    print(f"  {component}: using training params, constant value={min_val:.4f}, set to 0.0 (lower bound)")
                 else:
                     normalized_values = (values - min_val) / range_val
                     if i < 5:  # Only print details for first few components
@@ -476,8 +516,8 @@ class SWaTDataset(Dataset):
                 self.train_max_vals.append(max_val)
                 
                 if range_val == 0:
-                    normalized_values = np.full_like(values, 0.5, dtype=float)
-                    print(f"  {component}: training data, constant value={min_val:.4f}, set to 0.5")
+                    normalized_values = np.full_like(values, 0.0, dtype=float)  # Set to lower bound (0.0) like sklearn
+                    print(f"  {component}: training data, constant value={min_val:.4f}, set to 0.0 (lower bound)")
                 else:
                     normalized_values = (values - min_val) / range_val
                     if i < 5:  # Only print details for first few components
@@ -512,6 +552,166 @@ class SWaTDataset(Dataset):
         print(f"Feature tensor stats: min={features.min().item():.4f}, max={features.max().item():.4f}, mean={features.mean().item():.4f}")
         if self.use_first_order_differences:
             print(f"  Dimension 0: Proper MinMax normalized values (0-1 range)")
+            print(f"  Dimension 1: First-order differences (lag-1)")
+        
+        return features
+
+    def _compute_z_normalization_proper_x0(self):
+        """
+        Proper Z-normalization using training data parameters (StandardScaler approach).
+        This method implements the standard ML practice of fitting scaler on training data only.
+        Optionally includes first-order differences as additional features.
+        """
+        print("Preprocessing features using Proper Z-normalization (StandardScaler approach)...")
+        if self.use_first_order_differences:
+            print("Computing first-order differences (current_value - previous_value)")
+            
+        num_samples = len(self.data)
+        num_components = len(self.columns)
+        
+        # Create tensor with appropriate dimension (1D or 2D if differences enabled)
+        features = torch.zeros(num_samples, num_components, self.feature_dim_0)
+        
+        for i, component in enumerate(self.columns):
+            values = self.data[component].values
+            
+            # Check for NaN or infinite values before processing
+            if np.any(np.isnan(values)) or np.any(np.isinf(values)):
+                print(f"  WARNING: {component} contains NaN or infinite values before normalization!")
+                # Replace NaN/inf with column mean
+                finite_mask = np.isfinite(values)
+                if np.any(finite_mask):
+                    mean_val = np.mean(values[finite_mask])
+                    values = np.where(finite_mask, values, mean_val)
+                else:
+                    values = np.zeros_like(values)
+                print(f"  Fixed NaN/inf values in {component} using mean={mean_val:.4f}")
+            
+            # Use training data parameters for Z-normalization (proper ML approach)
+            if hasattr(self, 'train_mean_vals') and hasattr(self, 'train_std_vals') and len(self.train_mean_vals) > i:
+                # Use pre-computed training parameters (validation/test data)
+                mean_val = self.train_mean_vals[i]
+                std_val = self.train_std_vals[i]
+                
+                # SMART CONSTANT HANDLING: If training std is 0, set normalized values to 0
+                if std_val == 0:
+                    normalized_values = np.zeros_like(values)
+                    print(f"  {component}: CONSTANT component (std=0), set to 0.0")
+                else:
+                    normalized_values = (values - mean_val) / std_val
+                    
+                    if i < 5:  # Only print details for first few components
+                        if hasattr(self, 'using_precomputed_params') and self.using_precomputed_params:
+                            print(f"  {component}: using training params, mean={mean_val:.4f}, std={std_val:.4f}")
+                        else:
+                            print(f"  {component}: training data, mean={mean_val:.4f}, std={std_val:.4f}")
+            else:
+                # This is training data - compute and store parameters
+                mean_val = np.mean(values)
+                std_val = np.std(values)
+                
+                # Store for future use (validation/test)
+                if not hasattr(self, 'train_mean_vals'):
+                    self.train_mean_vals = []
+                    self.train_std_vals = []
+                self.train_mean_vals.append(mean_val)
+                self.train_std_vals.append(std_val)
+                
+                # SMART CONSTANT HANDLING: If std is 0, set normalized values to 0
+                if std_val == 0:
+                    normalized_values = np.zeros_like(values)
+                    print(f"  {component}: CONSTANT component (std=0), set to 0.0")
+                else:
+                    normalized_values = (values - mean_val) / std_val
+                    if i < 5:  # Only print details for first few components
+                        print(f"  {component}: training data, mean={mean_val:.4f}, std={std_val:.4f}")
+            
+            # Store normalized values in first dimension
+            features[:, i, 0] = torch.tensor(normalized_values, dtype=torch.float)
+            
+            # Compute first-order differences if enabled
+            if self.use_first_order_differences:
+                # Calculate lag-1 differences on NORMALIZED values (not raw values!)
+                normalized_differences = np.zeros_like(normalized_values)
+                normalized_differences[1:] = normalized_values[1:] - normalized_values[:-1]  # First sample difference = 0
+                
+                # Store normalized differences in the second dimension
+                features[:, i, 1] = torch.tensor(normalized_differences, dtype=torch.float32)
+                
+                # Print statistics about normalized differences
+                if i < 3:  # Only print for first few components to avoid spam
+                    mean_abs_diff = np.mean(np.abs(normalized_differences[1:]))  # Skip first zero
+                    max_abs_diff = np.max(np.abs(normalized_differences))
+                    print(f"    Proper Z-normalization first-order diff: mean_abs={mean_abs_diff:.6f}, max_abs={max_abs_diff:.6f}")
+        
+        # Final check for NaN/inf in the entire feature tensor
+        if torch.any(torch.isnan(features)) or torch.any(torch.isinf(features)):
+            print("ERROR: Final feature tensor contains NaN or infinite values!")
+            # Replace NaN/inf with zeros
+            features = torch.where(torch.isfinite(features), features, torch.zeros_like(features))
+            print("Fixed by replacing NaN/inf with zeros")
+        
+        print(f"Computed 0-cell features shape: {features.shape}")
+        print(f"Feature tensor stats: min={features.min().item():.4f}, max={features.max().item():.4f}, mean={features.mean().item():.4f}")
+        if self.use_first_order_differences:
+            print(f"  Dimension 0: Proper Z-normalized values")
+            print(f"  Dimension 1: First-order differences (lag-1)")
+        
+        return features
+
+    def _compute_robust_z_normalization_x0(self):
+        """
+        Robust Z-normalization that handles constants and extreme values.
+        """
+        print("Preprocessing features using Robust Z-normalization...")
+        num_samples = len(self.data)
+        num_components = len(self.columns)
+
+        # Initialize tensor for 0-cell features (1D or 2D based on first-order differences)
+        features = torch.zeros((num_samples, num_components, self.feature_dim_0))
+        
+        for i, col in enumerate(self.columns):
+            values = self.data[col].values
+            
+            # Calculate mean and std robustly
+            mean_val = np.mean(values)
+            std_val = np.std(values)  # No epsilon needed - we handle constants properly
+            
+            # Handle constant values
+            if std_val == 0:
+                normalized_values = np.zeros_like(values)
+                print(f"  {col}: CONSTANT component (std=0), set to 0.0")
+            else:
+                # Z-normalize: (x - mean) / std
+                normalized_values = (values - mean_val) / std_val
+            
+            # Store normalized values in first dimension
+            features[:, i, 0] = torch.tensor(normalized_values, dtype=torch.float)
+            
+            if i < 5:  # Only print first 5 for brevity
+                print(f"  {col}: mean={mean_val:.4f}, std={std_val:.4f}")
+            elif i == 5:
+                print(f"  ... (suppressing further normalization details)")
+            
+            # Compute first-order differences if enabled
+            if self.use_first_order_differences:
+                # Calculate lag-1 differences: current - previous
+                first_order_diffs = np.zeros_like(normalized_values)
+                first_order_diffs[1:] = normalized_values[1:] - normalized_values[:-1]
+                # First sample (index 0) has no previous sample, so difference = 0
+                first_order_diffs[0] = 0.0
+                
+                # Store first-order differences in second dimension
+                features[:, i, 1] = torch.tensor(first_order_diffs, dtype=torch.float)
+                
+                if i < 3:  # Debug info for first few components
+                    diff_mean = np.mean(np.abs(first_order_diffs[1:]))  # Exclude first sample for mean
+                    diff_max = np.max(np.abs(first_order_diffs))
+                    print(f"    First-order diff: mean_abs={diff_mean:.6f}, max_abs={diff_max:.6f}")
+        
+        print(f"Computed 0-cell features shape: {features.shape}")
+        if self.use_first_order_differences:
+            print(f"  Dimension 0: Robust Z-normalized values")
             print(f"  Dimension 1: First-order differences (lag-1)")
         
         return features
@@ -799,7 +999,10 @@ class SWaTDataset(Dataset):
         New implementation for 2-cell features with enhanced statistics.
         """
         if self.use_enhanced_2cell_features:
-            return self._compute_enhanced_x2(node_index_map)
+            if hasattr(self, 'use_attack_detection_features') and self.use_attack_detection_features:
+                return self._compute_swat_attack_detection_x2(node_index_map)  # 7D attack detection features
+            else:
+                return self._compute_enhanced_x2(node_index_map)
         else:
             return self._compute_simple_x2(node_index_map)
 
@@ -983,6 +1186,179 @@ class SWaTDataset(Dataset):
         
         return x_2
 
+    def _compute_swat_attack_detection_x2(self, node_index_map):
+        """
+        Compute SWAT-specific 2-cell features designed to detect attack patterns.
+        
+        Based on SWAT attack analysis, we create features that capture:
+        1. PLC-level anomalies (PLC1-6 zones)
+        2. Component type anomalies (FIT, LIT, AIT, MV, P)
+        3. Flow balance anomalies between PLCs
+        4. Actuator-sensor correlation anomalies
+        5. Process stage anomalies
+        
+        Returns 7D feature vectors per 2-cell (PLC zone):
+        [0] plc_mean: Average of all sensor values in PLC zone
+        [1] plc_std: Standard deviation of sensor values in PLC zone
+        [2] flow_sensor_anomaly: Anomaly score for flow sensors (FIT)
+        [3] level_sensor_anomaly: Anomaly score for level sensors (LIT)
+        [4] actuator_anomaly: Anomaly score for actuators (MV, P)
+        [5] flow_balance_anomaly: Flow balance between PLC stages
+        [6] process_stage_anomaly: Stage-specific anomaly indicators
+        """
+        print("Computing SWAT-specific 2-cell features for attack detection...")
+        
+        num_samples = len(self.data)
+        
+        # Get 2-cells (PLC zones) using the correct TopoNetX method
+        _, col_dict_12, _ = self.complex.incidence_matrix(1, 2, index=True)
+        cells_2 = list(col_dict_12.keys())
+        num_2_cells = len(cells_2)
+        
+        if num_2_cells == 0:
+            print("No 2-cells found, creating dummy 2-cell features")
+            return torch.zeros((num_samples, 1, 7))
+        
+        print(f"Found {num_2_cells} 2-cells (PLC zones)")
+        
+        # Create tensor for 2-cell features
+        x_2 = torch.zeros((num_samples, num_2_cells, 7))
+        
+        # Define SWAT PLC zones and their components
+        swat_plc_zones = {
+            0: "PLC1_Raw_Water",      # FIT101, LIT101, MV101, P101, P102
+            1: "PLC2_Chemical",       # AIT201-203, FIT201, MV201, P201-206
+            2: "PLC3_UltraFilt",      # DPIT301, FIT301, LIT301, MV301-304, P301-302
+            3: "PLC4_DeChloro",       # AIT401-402, FIT401, LIT401, P401-404, UV401
+            4: "PLC5_RO"              # AIT501-504, FIT501-504, P501-502, PIT501-503
+        }
+        
+        # Define component type mappings for anomaly detection
+        component_types = {
+            'FIT': ['FIT101', 'FIT201', 'FIT301', 'FIT401', 'FIT501', 'FIT502', 'FIT503', 'FIT504', 'FIT601'],
+            'LIT': ['LIT101', 'LIT301', 'LIT401'],
+            'AIT': ['AIT201', 'AIT202', 'AIT203', 'AIT401', 'AIT402', 'AIT501', 'AIT502', 'AIT503', 'AIT504'],
+            'MV': ['MV101', 'MV201', 'MV301', 'MV302', 'MV303', 'MV304'],
+            'P': ['P101', 'P102', 'P201', 'P202', 'P203', 'P204', 'P205', 'P206', 'P301', 'P302', 'P401', 'P402', 'P403', 'P404', 'P501', 'P502', 'P601', 'P602', 'P603'],
+            'DPIT': ['DPIT301'],
+            'PIT': ['PIT501', 'PIT502', 'PIT503'],
+            'UV': ['UV401']
+        }
+        
+        # Create component to type mapping
+        component_to_type = {}
+        for comp_type, patterns in component_types.items():
+            for pattern in patterns:
+                for col in self.columns:
+                    if pattern in col:
+                        component_to_type[col] = comp_type
+        
+        # Create PLC zone to component mapping based on SWAT_SUB_MAP
+        plc_components = {
+            0: ['FIT101', 'LIT101', 'MV101', 'P101', 'P102'],  # PLC1
+            1: ['AIT201', 'AIT202', 'AIT203', 'FIT201', 'MV201', 'P201', 'P202', 'P203', 'P204', 'P205', 'P206'],  # PLC2
+            2: ['FIT301', 'LIT301', 'DPIT301', 'P301', 'P302', 'MV301', 'MV302', 'MV303', 'MV304'],  # PLC3
+            3: ['UV401', 'P401', 'P402', 'P403', 'P404', 'AIT401', 'AIT402', 'FIT401', 'LIT401'],  # PLC4
+            4: ['AIT501', 'AIT502', 'AIT503', 'AIT504', 'FIT501', 'FIT502', 'FIT503', 'FIT504', 'P501', 'P502', 'PIT501', 'PIT502', 'PIT503'],  # PLC5
+            5: ['P601', 'P602', 'P603', 'FIT601']  # PLC6 (Return)
+        }
+        
+        # Define flow connections between PLCs for flow balance
+        flow_connections = {
+            (0, 1): [('FIT101', 'FIT201')],  # PLC1 -> PLC2
+            (1, 2): [('FIT201', 'FIT301')],  # PLC2 -> PLC3
+            (2, 3): [('FIT301', 'FIT401')],  # PLC3 -> PLC4
+            (3, 4): [('FIT401', 'FIT501')],  # PLC4 -> PLC5
+            (4, 5): [('FIT501', 'FIT601')]   # PLC5 -> PLC6
+        }
+        
+        # Define attack-prone components based on attack analysis
+        attack_prone_components = {
+            'MV101', 'P102', 'LIT101', 'AIT202', 'LIT301', 'DPIT301', 'FIT401', 
+            'MV304', 'LIT301', 'MV303', 'AIT504', 'LIT101', 'UV401', 'AIT502',
+            'DPIT301', 'MV302', 'P602', 'P203', 'P205', 'LIT401', 'P402', 'P101',
+            'LIT301', 'P302', 'LIT101', 'MV201', 'LIT101', 'P101', 'LIT101',
+            'FIT502', 'AIT402', 'AIT502', 'FIT401', 'LIT301'
+        }
+        
+        for sample_idx in range(num_samples):
+            sample_x0 = self.x_0[sample_idx, :, 0]  # Use normalized values
+            
+            for cell_idx in range(num_2_cells):
+                if cell_idx not in plc_components:
+                    continue
+                    
+                components = plc_components[cell_idx]
+                component_indices = [self.component_to_idx[comp] for comp in components if comp in self.component_to_idx]
+                
+                if not component_indices:
+                    continue
+                
+                # Feature 0: PLC mean
+                plc_values = sample_x0[component_indices]
+                x_2[sample_idx, cell_idx, 0] = torch.mean(plc_values)
+                
+                # Feature 1: PLC standard deviation
+                if len(component_indices) > 1:
+                    x_2[sample_idx, cell_idx, 1] = torch.std(plc_values)
+                else:
+                    x_2[sample_idx, cell_idx, 1] = 0.0
+                
+                # Feature 2: Flow sensor anomaly score
+                flow_sensors = [comp for comp in components if 'FIT' in comp]
+                if flow_sensors:
+                    flow_indices = [self.component_to_idx[comp] for comp in flow_sensors if comp in self.component_to_idx]
+                    if flow_indices:
+                        flow_values = sample_x0[flow_indices]
+                        x_2[sample_idx, cell_idx, 2] = torch.mean(torch.abs(flow_values))
+                
+                # Feature 3: Level sensor anomaly score
+                level_sensors = [comp for comp in components if 'LIT' in comp]
+                if level_sensors:
+                    level_indices = [self.component_to_idx[comp] for comp in level_sensors if comp in self.component_to_idx]
+                    if level_indices:
+                        level_values = sample_x0[level_indices]
+                        x_2[sample_idx, cell_idx, 3] = torch.mean(torch.abs(level_values))
+                
+                # Feature 4: Actuator anomaly score
+                actuators = [comp for comp in components if is_actuator("SWAT", comp)]
+                if actuators:
+                    actuator_indices = [self.component_to_idx[comp] for comp in actuators if comp in self.component_to_idx]
+                    if actuator_indices:
+                        actuator_values = sample_x0[actuator_indices]
+                        x_2[sample_idx, cell_idx, 4] = torch.mean(torch.abs(actuator_values))
+                
+                # Feature 5: Flow balance anomaly
+                flow_balance = 0.0
+                for (src_plc, dst_plc), connections in flow_connections.items():
+                    if cell_idx in [src_plc, dst_plc]:
+                        for src_comp, dst_comp in connections:
+                            if src_comp in self.component_to_idx and dst_comp in self.component_to_idx:
+                                src_val = sample_x0[self.component_to_idx[src_comp]]
+                                dst_val = sample_x0[self.component_to_idx[dst_comp]]
+                                flow_balance += torch.abs(src_val - dst_val)
+                x_2[sample_idx, cell_idx, 5] = flow_balance
+                
+                # Feature 6: Attack-prone component anomaly score
+                attack_prone_in_plc = [comp for comp in components if comp in attack_prone_components]
+                if attack_prone_in_plc:
+                    attack_indices = [self.component_to_idx[comp] for comp in attack_prone_in_plc if comp in self.component_to_idx]
+                    if attack_indices:
+                        attack_values = sample_x0[attack_indices]
+                        x_2[sample_idx, cell_idx, 6] = torch.mean(torch.abs(attack_values))
+        
+        print(f"Computed SWAT-specific 2-cell features shape: {x_2.shape}")
+        print(f"  Feature dimensions:")
+        print(f"    0: PLC mean")
+        print(f"    1: PLC std")
+        print(f"    2: Flow sensor anomaly")
+        print(f"    3: Level sensor anomaly")
+        print(f"    4: Actuator anomaly")
+        print(f"    5: Flow balance anomaly")
+        print(f"    6: Attack-prone component anomaly")
+        
+        return x_2
+
     def create_adjacency_matrices(self):
         """Create adjacency matrices for the complex."""
         print("Creating adjacency matrices...")
@@ -1003,12 +1379,15 @@ class SWaTDataset(Dataset):
         b1 = self.complex.incidence_matrix(rank=0, to_rank=1, index=False)
         b2 = self.complex.incidence_matrix(rank=1, to_rank=2, index=False)
         
-        # Convert to sparse tensors (following pattern from other datasets)
-        a0_tensor = torch.from_numpy(a0.toarray()).to_sparse()
-        a1_tensor = torch.from_numpy(a1.toarray()).to_sparse()
-        coa2_tensor = torch.from_numpy(coa2.toarray()).to_sparse()
-        b1_tensor = torch.from_numpy(b1.toarray()).to_sparse()
-        b2_tensor = torch.from_numpy(b2.toarray()).to_sparse()
+        # Convert to sparse tensors with FLOAT dtype to match feature tensors
+        a0_tensor = torch.from_numpy(a0.toarray()).float().to_sparse()
+        a1_tensor = torch.from_numpy(a1.toarray()).float().to_sparse()
+        coa2_tensor = torch.from_numpy(coa2.toarray()).float().to_sparse()
+        b1_tensor = torch.from_numpy(b1.toarray()).float().to_sparse()
+        b2_tensor = torch.from_numpy(b2.toarray()).float().to_sparse()
+        
+        print(f"DEBUG: Adjacency matrix dtypes - a0: {a0_tensor.dtype}, a1: {a1_tensor.dtype}, coa2: {coa2_tensor.dtype}")
+        print(f"DEBUG: Incidence matrix dtypes - b1: {b1_tensor.dtype}, b2: {b2_tensor.dtype}")
         
         return a0_tensor, a1_tensor, coa2_tensor, b1_tensor, b2_tensor
 
