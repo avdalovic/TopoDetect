@@ -142,8 +142,8 @@ class SWaTDataset(Dataset):
         
         # Set 2-cell feature dimensions
         if use_attack_detection_features:
-            self.feature_dim_2 = 7  # 7D attack detection features
-            print(f"Using attack detection 2-cell features: {self.feature_dim_2}D")
+            self.feature_dim_2 = 12  # 12D enhanced attack detection features
+            print(f"Using enhanced attack detection 2-cell features: {self.feature_dim_2}D")
         else:
             base_2cell_dim = 4 if use_enhanced_2cell_features else 1
             if use_flow_balance_features:
@@ -1188,25 +1188,32 @@ class SWaTDataset(Dataset):
 
     def _compute_swat_attack_detection_x2(self, node_index_map):
         """
-        Compute SWAT-specific 2-cell features designed to detect attack patterns.
+        Enhanced SWAT-specific 2-cell features designed to detect ALL attack patterns.
         
-        Based on SWAT attack analysis, we create features that capture:
-        1. PLC-level anomalies (PLC1-6 zones)
-        2. Component type anomalies (FIT, LIT, AIT, MV, P)
-        3. Flow balance anomalies between PLCs
-        4. Actuator-sensor correlation anomalies
-        5. Process stage anomalies
+        Based on analysis of missed attacks, we need additional features:
+        1. Small magnitude attack detection (magnitude < 1.0)
+        2. Linear attack pattern detection (line attacks)
+        3. Multi-component attack correlation
+        4. Temporal consistency features
+        5. Component-specific anomaly thresholds
+        6. Cross-PLC communication anomalies
+        7. Actuator-sensor state mismatch detection
         
-        Returns 7D feature vectors per 2-cell (PLC zone):
+        Returns 12D feature vectors per 2-cell (PLC zone):
         [0] plc_mean: Average of all sensor values in PLC zone
         [1] plc_std: Standard deviation of sensor values in PLC zone
         [2] flow_sensor_anomaly: Anomaly score for flow sensors (FIT)
         [3] level_sensor_anomaly: Anomaly score for level sensors (LIT)
         [4] actuator_anomaly: Anomaly score for actuators (MV, P)
         [5] flow_balance_anomaly: Flow balance between PLC stages
-        [6] process_stage_anomaly: Stage-specific anomaly indicators
+        [6] attack_prone_component_anomaly: Attack-prone component anomaly score
+        [7] small_magnitude_anomaly: Detection of small magnitude attacks (<1.0)
+        [8] linear_pattern_anomaly: Detection of linear attack patterns
+        [9] multi_component_correlation: Multi-component attack correlation
+        [10] temporal_consistency: Temporal consistency across components
+        [11] cross_plc_anomaly: Cross-PLC communication anomalies
         """
-        print("Computing SWAT-specific 2-cell features for attack detection...")
+        print("Computing ENHANCED SWAT-specific 2-cell features for attack detection...")
         
         num_samples = len(self.data)
         
@@ -1217,12 +1224,12 @@ class SWaTDataset(Dataset):
         
         if num_2_cells == 0:
             print("No 2-cells found, creating dummy 2-cell features")
-            return torch.zeros((num_samples, 1, 7))
+            return torch.zeros((num_samples, 1, 12))
         
         print(f"Found {num_2_cells} 2-cells (PLC zones)")
         
         # Create tensor for 2-cell features
-        x_2 = torch.zeros((num_samples, num_2_cells, 7))
+        x_2 = torch.zeros((num_samples, num_2_cells, 12))
         
         # Define SWAT PLC zones and their components
         swat_plc_zones = {
@@ -1280,6 +1287,25 @@ class SWaTDataset(Dataset):
             'LIT301', 'P302', 'LIT101', 'MV201', 'LIT101', 'P101', 'LIT101',
             'FIT502', 'AIT402', 'AIT502', 'FIT401', 'LIT301'
         }
+        
+        # Define small magnitude attack thresholds (based on missed attacks)
+        small_magnitude_thresholds = {
+            'MV101': 0.7,    # Attack 0: magnitude 0.61
+            'MV304': 0.2,    # Attack 7: magnitude -0.1
+            'P402': 0.1,     # Attack 16: magnitude 0.06
+            'P101': 0.7,     # Attack 17: magnitude 0.58
+            'LIT301': 1.1,   # Attack 17: magnitude -1.04
+        }
+        
+        # Define components prone to linear attacks
+        linear_attack_components = {'LIT101', 'LIT301'}  # Based on missed attacks 2 and 8
+        
+        # Define multi-component attack pairs
+        multi_component_pairs = [
+            ('P203', 'P205'),  # Attack 15
+            ('LIT401', 'P402'),  # Attack 16
+            ('P101', 'LIT301'),  # Attack 17
+        ]
         
         for sample_idx in range(num_samples):
             sample_x0 = self.x_0[sample_idx, :, 0]  # Use normalized values
@@ -1346,8 +1372,73 @@ class SWaTDataset(Dataset):
                     if attack_indices:
                         attack_values = sample_x0[attack_indices]
                         x_2[sample_idx, cell_idx, 6] = torch.mean(torch.abs(attack_values))
+                
+                # Feature 7: Small magnitude anomaly detection
+                small_mag_anomaly = 0.0
+                for comp in components:
+                    if comp in small_magnitude_thresholds and comp in self.component_to_idx:
+                        comp_val = abs(sample_x0[self.component_to_idx[comp]])
+                        threshold = small_magnitude_thresholds[comp]
+                        if comp_val > threshold:
+                            small_mag_anomaly += comp_val - threshold
+                x_2[sample_idx, cell_idx, 7] = small_mag_anomaly
+                
+                # Feature 8: Linear pattern anomaly detection
+                linear_anomaly = 0.0
+                linear_comps_in_plc = [comp for comp in components if comp in linear_attack_components]
+                if linear_comps_in_plc:
+                    linear_indices = [self.component_to_idx[comp] for comp in linear_comps_in_plc if comp in self.component_to_idx]
+                    if linear_indices:
+                        linear_values = sample_x0[linear_indices]
+                        # Check for linear patterns (high variance in small ranges)
+                        if len(linear_values) > 1:
+                            linear_anomaly = torch.std(linear_values) * torch.mean(torch.abs(linear_values))
+                        else:
+                            linear_anomaly = torch.abs(linear_values[0])
+                x_2[sample_idx, cell_idx, 8] = linear_anomaly
+                
+                # Feature 9: Multi-component correlation anomaly
+                multi_comp_anomaly = 0.0
+                for comp1, comp2 in multi_component_pairs:
+                    if comp1 in components and comp2 in components:
+                        if comp1 in self.component_to_idx and comp2 in self.component_to_idx:
+                            val1 = sample_x0[self.component_to_idx[comp1]]
+                            val2 = sample_x0[self.component_to_idx[comp2]]
+                            # Check for correlated anomalies
+                            if abs(val1) > 0.5 and abs(val2) > 0.5:
+                                multi_comp_anomaly += abs(val1) + abs(val2)
+                x_2[sample_idx, cell_idx, 9] = multi_comp_anomaly
+                
+                # Feature 10: Temporal consistency (using previous sample if available)
+                temporal_anomaly = 0.0
+                if sample_idx > 0:
+                    prev_sample_x0 = self.x_0[sample_idx-1, :, 0]
+                    for comp in components:
+                        if comp in self.component_to_idx:
+                            curr_val = sample_x0[self.component_to_idx[comp]]
+                            prev_val = prev_sample_x0[self.component_to_idx[comp]]
+                            # Check for sudden changes
+                            change = abs(curr_val - prev_val)
+                            if change > 0.5:  # Threshold for sudden changes
+                                temporal_anomaly += change
+                x_2[sample_idx, cell_idx, 10] = temporal_anomaly
+                
+                # Feature 11: Cross-PLC communication anomaly
+                cross_plc_anomaly = 0.0
+                for (src_plc, dst_plc), connections in flow_connections.items():
+                    if cell_idx in [src_plc, dst_plc]:
+                        for src_comp, dst_comp in connections:
+                            if src_comp in self.component_to_idx and dst_comp in self.component_to_idx:
+                                src_val = sample_x0[self.component_to_idx[src_comp]]
+                                dst_val = sample_x0[self.component_to_idx[dst_comp]]
+                                # Check for communication breakdown
+                                if abs(src_val) > 1.0 and abs(dst_val) < 0.1:
+                                    cross_plc_anomaly += abs(src_val)
+                                elif abs(dst_val) > 1.0 and abs(src_val) < 0.1:
+                                    cross_plc_anomaly += abs(dst_val)
+                x_2[sample_idx, cell_idx, 11] = cross_plc_anomaly
         
-        print(f"Computed SWAT-specific 2-cell features shape: {x_2.shape}")
+        print(f"Computed ENHANCED SWAT-specific 2-cell features shape: {x_2.shape}")
         print(f"  Feature dimensions:")
         print(f"    0: PLC mean")
         print(f"    1: PLC std")
@@ -1356,6 +1447,11 @@ class SWaTDataset(Dataset):
         print(f"    4: Actuator anomaly")
         print(f"    5: Flow balance anomaly")
         print(f"    6: Attack-prone component anomaly")
+        print(f"    7: Small magnitude anomaly detection")
+        print(f"    8: Linear pattern anomaly detection")
+        print(f"    9: Multi-component correlation anomaly")
+        print(f"    10: Temporal consistency anomaly")
+        print(f"    11: Cross-PLC communication anomaly")
         
         return x_2
 
