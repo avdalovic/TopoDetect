@@ -50,3 +50,8 @@ swat_anomaly_detection.py
 test_topox.ipynb
 tutotial.ipynb
 utils/check_utils.py
+
+# Analysis files (keep local, don't push to repo)
+analyze_missed_attacks.py
+enhanced_features_summary.md
+compare_topologies.py
