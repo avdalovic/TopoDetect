@@ -411,13 +411,9 @@ def run_experiment(config):
     use_first_order_differences = config.get('data', {}).get('use_first_order_differences', False)
     use_first_order_differences_edges = config.get('data', {}).get('use_first_order_differences_edges', True)
     use_flow_balance_features = config.get('data', {}).get('use_flow_balance_features', False)
+    use_attack_detection_features = config.get('data', {}).get('use_attack_detection_features', False)
     
-    print(f"Feature engineering config:")
-    print(f"  normalization={normalization_method}")
-    print(f"  enhanced_2cell={use_enhanced_2cell_features}")
-    print(f"  first_order_diff_nodes={use_first_order_differences}")
-    print(f"  first_order_diff_edges={use_first_order_differences_edges}")
-    print(f"  flow_balance_features={use_flow_balance_features}")
+    # Feature engineering configured
     
     if temporal_mode:
         dataset_args = {
@@ -430,6 +426,7 @@ def run_experiment(config):
             'use_first_order_differences': use_first_order_differences,
             'use_first_order_differences_edges': use_first_order_differences_edges,
             'use_flow_balance_features': use_flow_balance_features,
+            'use_attack_detection_features': use_attack_detection_features,
             'seed': seed
         }
     else:
@@ -441,12 +438,32 @@ def run_experiment(config):
             'use_first_order_differences': use_first_order_differences,
             'use_first_order_differences_edges': use_first_order_differences_edges,
             'use_flow_balance_features': use_flow_balance_features,
+            'use_attack_detection_features': use_attack_detection_features,
             'seed': seed
         }
 
+    # Create training dataset first to compute normalization parameters
     train_dataset = SWaTDataset(train_data, swat_complex, **dataset_args)
-    validation_dataset = SWaTDataset(validation_data, swat_complex, **dataset_args) if not validation_data.empty else None
-    test_dataset = SWaTDataset(test_data, swat_complex, **dataset_args)
+    
+    # Extract normalization parameters from training dataset
+    normalization_params = {}
+    if hasattr(train_dataset, 'train_min_vals') and hasattr(train_dataset, 'train_max_vals'):
+        normalization_params['train_min_vals'] = train_dataset.train_min_vals
+        normalization_params['train_max_vals'] = train_dataset.train_max_vals
+    elif hasattr(train_dataset, 'train_mean_vals') and hasattr(train_dataset, 'train_std_vals'):
+        normalization_params['train_mean_vals'] = train_dataset.train_mean_vals
+        normalization_params['train_std_vals'] = train_dataset.train_std_vals
+    
+    # Create validation dataset with shared parameters
+    if not validation_data.empty:
+        validation_dataset = SWaTDataset(validation_data, swat_complex, **dataset_args, **normalization_params)
+    else:
+        validation_dataset = None
+    
+    # Create test dataset with shared parameters
+    test_dataset = SWaTDataset(test_data, swat_complex, **dataset_args, **normalization_params)
+
+    # Datasets prepared
 
     # Create dataloaders
     batch_size = config['training']['batch_size']
@@ -502,6 +519,9 @@ def run_experiment(config):
         n_input=config['model'].get('n_input', 10), # Get n_input safely
         use_enhanced_decoders=use_enhanced_decoders
     )
+
+    # Contrastive pre-training removed from pipeline
+    print("Contrastive pre-training disabled.")
 
     # Create trainer with validation dataloader
     print("Creating trainer with validation set for thresholding...")
@@ -575,11 +595,15 @@ def run_experiment(config):
         min_delta=float(config['training']['early_stopping']['min_delta'])
     )
 
-    # Save final test results
+    # Save final test results and artifacts
     results_path = os.path.join(checkpoint_dir, "final_results.pkl")
     with open(results_path, 'wb') as f:
         pickle.dump(final_test_results, f)
     print(f"Final results saved to {results_path}")
+
+    # Save artifacts for USENIX evaluation
+    print("Saving USENIX evaluation artifacts...")
+    trainer.save_artifacts(checkpoint_dir, final_test_results)
 
     # --- Attack analysis temporarily disabled ---
     # print("Analyzing attack detection performance...")

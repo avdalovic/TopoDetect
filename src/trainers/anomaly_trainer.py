@@ -4,7 +4,13 @@ import pickle
 import numpy as np
 import torch
 from torch import nn
-import wandb
+# Conditional wandb import
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("Warning: wandb not available. Logging to console only.")
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import pandas as pd
@@ -60,7 +66,10 @@ class AnomalyTrainer:
                  sample_rate=1.0,
                  # Dataset-specific parameters
                  dataset_name="SWAT",  # Dataset name for attack indices
-                 level_names=None):  # Custom level names (defaults to ["Nodes", "Edges", "PLCs"])
+                 level_names=None,  # Custom level names (defaults to ["Nodes", "Edges", "PLCs"])
+                 # Robust normalization parameters (GDN/STADN approach)
+                 use_robust_normalization=False,  # Enable robust median/IQR normalization
+                 robust_threshold_percentile=99.0):  # Percentile for robust threshold
         """
         Initialize the trainer with additional training options.
         """
@@ -119,7 +128,8 @@ class AnomalyTrainer:
         self.sample_rate = sample_rate
         
         # General components
-        self.crit = nn.MSELoss(reduction='none')
+        self.crit = nn.MSELoss(reduction='none')  # Keep MSE for training and standard evaluation
+        self.crit_mae = nn.L1Loss(reduction='none')  # Add MAE for robust normalization
         self.opt = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.opt, mode='min', factor=0.5, patience=5, verbose=True)
         self.grad_clip_value = grad_clip_value
@@ -129,35 +139,28 @@ class AnomalyTrainer:
         if self.validation_dataloader is None or len(self.validation_dataloader.dataset) == 0:
              raise ValueError("Validation dataloader is required and cannot be empty for threshold calibration.")
 
-        print(f"Initialized AnomalyTrainer with device {device}")
-        print(f"Dataset: {self.dataset_name}")
-        print(f"Level names: {self.level_names}")
-        print(f"Evaluation Method: {self.evaluation_method}")
-        if self.evaluation_method == 'cusum':
-            if not CUSUM_AVAILABLE:
-                raise ImportError("CUSUM method selected but CUSUM module not available. Use 'threshold' method instead.")
-            print(f"CUSUM Params: S={self.cusum_S}, G={self.cusum_G}")
-        else:
-            print(f"Threshold method: {threshold_method}")
+        # Trainer initialized
+
+        # Store additional parameters
+        self.dataset_name = dataset_name
+        self.level_names = level_names if level_names else ["Nodes", "Edges", "PLCs"]
+        self.sample_rate = sample_rate
         
-        # Print enhanced time-aware metrics configuration
-        print(f"Enhanced Time-Aware Metrics Config:")
-        print(f"  theta_p (precision threshold): {self.theta_p}")
-        print(f"  theta_r (recall threshold): {self.theta_r}")
-        print(f"  sample_rate: {self.sample_rate}")
-        print(f"  original_sample_hz: {self.original_sample_hz}")
-        print(f"  effective_sample_hz: {self.original_sample_hz * self.sample_rate:.4f}")
-        print(f"  fp_alarm_window: {self.fp_alarm_window}s -> {int(self.fp_alarm_window * self.original_sample_hz * self.sample_rate)} points")
-        print(f"  temporal_consistency: {self.temporal_consistency} (require {self.temporal_consistency} consecutive anomalies)")
+        # Robust normalization parameters (GDN)
+        self.use_robust_normalization = use_robust_normalization
+        self.robust_threshold_percentile = robust_threshold_percentile
         
-        # Print categorical embedding configuration
-        if hasattr(self.model, 'use_categorical_embeddings') and self.model.use_categorical_embeddings:
-            print(f"🚀 Categorical Embeddings ENABLED:")
-            print(f"  - Number of sensor types: {self.model.num_sensor_types}")
-            print(f"  - Embedding dimension: {self.model.categorical_embedding_dim}")
-            print(f"  - Embeddings will enhance features during encoding but won't be reconstructed")
-        else:
-            print(f"❌ Categorical Embeddings DISABLED")
+        # Initialize robust normalization statistics
+        self.robust_stats = {
+            'median_0': None,
+            'iqr_0': None,
+            'median_1': None, 
+            'iqr_1': None,
+            'median_2': None,
+            'iqr_2': None
+        }
+        
+        # Configuration loaded
 
     def apply_temporal_consistency(self, raw_prediction):
         """
@@ -326,15 +329,10 @@ class AnomalyTrainer:
         Calibrates the anomaly detection method using the validation set.
         Supports both 'threshold' and 'cusum' methods.
         """
-        print(f"\nCalibrating using '{self.evaluation_method}' method on validation data...")
-        
         # Check if validation dataloader exists
         if self.validation_dataloader is None:
             print("ERROR: No validation dataloader available for calibration!")
-            print("This usually means validation_data was empty during dataset creation.")
             return
-            
-        print(f"DEBUG: Validation dataloader has {len(self.validation_dataloader)} batches")
         self.model.eval()
         all_residuals_0 = []
         all_residuals_1 = []
@@ -342,20 +340,17 @@ class AnomalyTrainer:
 
         with torch.no_grad():
             try:
-                batch_count = 0
                 for sample in self.validation_dataloader:
-                    batch_count += 1
-                    if batch_count <= 3:  # Debug first few batches
-                        print(f"DEBUG: Processing calibration batch {batch_count}")
                     
                     if self.model.temporal_mode:
                         sample = self.to_device(sample)
                         x0_pred, _ = self.model(sample)
-                        # Use L2 loss consistently (MSE without reduction)
-                        residuals_0 = self.crit(x0_pred, sample['target_x0'])
+                        # Use appropriate loss based on normalization method
+                        if self.use_robust_normalization:
+                            residuals_0 = self.crit_mae(x0_pred, sample['target_x0'])  # Use MAE for robust normalization
+                        else:
+                            residuals_0 = self.crit(x0_pred, sample['target_x0'])  # Use MSE for standard approach
                         all_residuals_0.append(residuals_0)
-                        if batch_count <= 3:
-                            print(f"DEBUG: Temporal residuals_0 shape: {residuals_0.shape}")
                     else:
                         x_0, x_1, x_2, a0, a1, coa2, b1, b2, _ = self.to_device(sample)
                         
@@ -367,24 +362,29 @@ class AnomalyTrainer:
                         # Standard reconstruction
                         x_0_recon, x_1_recon, x_2_recon = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2, type_ids)
                         
-                        # Use L2 loss consistently (MSE without reduction) for all levels
-                        # For categorical embeddings, only compute loss on original features (first 2 dimensions)
-                        if hasattr(self.model, 'use_categorical_embeddings') and self.model.use_categorical_embeddings:
-                            x_0_original = x_0[:, :, :2]  # Only normalized_value + first_order_diff
-                            residuals_0 = self.crit(x_0_recon, x_0_original)
+                        # Use appropriate loss based on normalization method
+                        if self.use_robust_normalization:
+                            # Use MAE for robust normalization
+                            if hasattr(self.model, 'use_categorical_embeddings') and self.model.use_categorical_embeddings:
+                                x_0_original = x_0[:, :, :2]  # Only normalized_value + first_order_diff
+                                residuals_0 = self.crit_mae(x_0_recon, x_0_original)
+                            else:
+                                residuals_0 = self.crit_mae(x_0_recon, x_0)
+                            residuals_1 = self.crit_mae(x_1_recon, x_1)
+                            residuals_2 = self.crit_mae(x_2_recon, x_2)
                         else:
-                            residuals_0 = self.crit(x_0_recon, x_0)
-                        residuals_1 = self.crit(x_1_recon, x_1)
-                        residuals_2 = self.crit(x_2_recon, x_2)
-                        
-                        if batch_count <= 3:
-                            print(f"DEBUG: Reconstruction residuals shapes - 0: {residuals_0.shape}, 1: {residuals_1.shape}, 2: {residuals_2.shape}")
+                            # Use MSE for standard approach
+                            if hasattr(self.model, 'use_categorical_embeddings') and self.model.use_categorical_embeddings:
+                                x_0_original = x_0[:, :, :2]  # Only normalized_value + first_order_diff
+                                residuals_0 = self.crit(x_0_recon, x_0_original)
+                            else:
+                                residuals_0 = self.crit(x_0_recon, x_0)
+                            residuals_1 = self.crit(x_1_recon, x_1)
+                            residuals_2 = self.crit(x_2_recon, x_2)
                         
                         all_residuals_0.append(residuals_0)
                         all_residuals_1.append(residuals_1)
                         all_residuals_2.append(residuals_2)
-                
-                print(f"DEBUG: Processed {batch_count} calibration batches")
             except Exception as e:
                 print(f"ERROR: Calibration failed during batch processing: {e}")
                 print(f"Error type: {type(e).__name__}")
@@ -394,9 +394,7 @@ class AnomalyTrainer:
 
         # Concatenate all residuals
         try:
-            print(f"DEBUG: Concatenating residuals - Level 0: {len(all_residuals_0)} tensors")
             all_residuals_0 = torch.cat(all_residuals_0, dim=0)
-            print(f"DEBUG: Concatenated residuals_0 shape: {all_residuals_0.shape}")
         except Exception as e:
             print(f"ERROR: Failed to concatenate level 0 residuals: {e}")
             return
@@ -411,86 +409,53 @@ class AnomalyTrainer:
             # Calculate thresholds for each level
             if not self.model.temporal_mode:
                 try:
-                    print(f"DEBUG: Concatenating residuals - Level 1: {len(all_residuals_1)} tensors")
                     all_residuals_1 = torch.cat(all_residuals_1, dim=0)
-                    print(f"DEBUG: Concatenated residuals_1 shape: {all_residuals_1.shape}")
-                    
-                    print(f"DEBUG: Concatenating residuals - Level 2: {len(all_residuals_2)} tensors")
                     all_residuals_2 = torch.cat(all_residuals_2, dim=0)
-                    print(f"DEBUG: Concatenated residuals_2 shape: {all_residuals_2.shape}")
                 except Exception as e:
                     print(f"ERROR: Failed to concatenate level 1/2 residuals: {e}")
                     return
                 
-                if self.threshold_method == "evt":
-                    # Per-component EVT thresholding
-                    print("Using EVT (Extreme Value Theory) per-component thresholding...")
+                # Check if robust normalization is enabled (GDN/STADN approach)
+                if self.use_robust_normalization:
+                    self._calibrate_robust_normalization(all_residuals_0, all_residuals_1, all_residuals_2)
+                # Check if per-component thresholds are enabled
+                elif hasattr(self, 'use_component_thresholds') and self.use_component_thresholds:
+                    self.calibrate_per_component_thresholds()
                     
-                    # For 0-cells: per-component thresholds (shape: [n_samples, n_components, feature_dim])
-                    self.evt_thresholds_0 = self._fit_evt_thresholds(all_residuals_0.squeeze(-1))  # Remove feature dim
+                    # Also compute global thresholds for comparison
+                    error_per_sample_0 = torch.mean(all_residuals_0, dim=(1, 2))  # Average across components and features
+                    error_per_sample_1 = torch.mean(all_residuals_1, dim=(1, 2))
+                    error_per_sample_2 = torch.mean(all_residuals_2, dim=(1, 2))
                     
-                    # For 1-cells: per-edge thresholds (shape: [n_samples, n_edges, feature_dim])
-                    self.evt_thresholds_1 = self._fit_evt_thresholds(all_residuals_1.mean(-1))  # Average over feature dims
+                    # Calculate global thresholds for comparison
+                    self.thresholds = {
+                        '0': torch.quantile(error_per_sample_0, self.threshold_percentile / 100.0).item(),
+                        '1': torch.quantile(error_per_sample_1, self.threshold_percentile / 100.0).item(),
+                        '2': torch.quantile(error_per_sample_2, self.threshold_percentile / 100.0).item()
+                    }
                     
-                    # For 2-cells: per-PLC thresholds (shape: [n_samples, n_plcs, feature_dim])
-                    self.evt_thresholds_2 = self._fit_evt_thresholds(all_residuals_2.mean(-1))  # Average over feature dims
-                    
-                    print(f"Calibrated EVT thresholds:")
-                    print(f"  0-cells: {self.evt_thresholds_0.shape[0]} component-specific thresholds")
-                    print(f"  1-cells: {self.evt_thresholds_1.shape[0]} edge-specific thresholds") 
-                    print(f"  2-cells: {self.evt_thresholds_2.shape[0]} PLC-specific thresholds")
-                    print(f"  Sample thresholds - 0-cells: min={self.evt_thresholds_0.min():.4f}, max={self.evt_thresholds_0.max():.4f}")
-                    print(f"  Sample thresholds - 1-cells: min={self.evt_thresholds_1.min():.4f}, max={self.evt_thresholds_1.max():.4f}")
-                    print(f"  Sample thresholds - 2-cells: min={self.evt_thresholds_2.min():.4f}, max={self.evt_thresholds_2.max():.4f}")
-                    
+                    # Thresholds computed
                 else:
-                    # Original percentile-based thresholding
-                    try:
-                        print(f"DEBUG: Computing per-sample errors for threshold calculation")
-                        # Calculate percentile thresholds for each level
-                        error_per_sample_0 = torch.mean(all_residuals_0.cpu(), dim=(1, 2))
-                        error_per_sample_1 = torch.mean(all_residuals_1.cpu(), dim=(1, 2))
-                        error_per_sample_2 = torch.mean(all_residuals_2.cpu(), dim=(1, 2))
-                        
-                        print(f"DEBUG: Error per sample shapes - 0: {error_per_sample_0.shape}, 1: {error_per_sample_1.shape}, 2: {error_per_sample_2.shape}")
-                        print(f"DEBUG: Error per sample stats - 0: mean={error_per_sample_0.mean():.4f}, 1: mean={error_per_sample_1.mean():.4f}, 2: mean={error_per_sample_2.mean():.4f}")
-                        
-                        self.anomaly_threshold_0 = np.percentile(error_per_sample_0.numpy(), self.threshold_percentile)
-                        self.anomaly_threshold_1 = np.percentile(error_per_sample_1.numpy(), self.threshold_percentile)
-                        
-                        if self.use_two_threshold_alarm:
-                            self.anomaly_threshold_2_low = np.percentile(error_per_sample_2.numpy(), self.plc_low_percentile)
-                            self.anomaly_threshold_2_high = np.percentile(error_per_sample_2.numpy(), self.plc_high_percentile)
-                            print(f"Calibrated 3-level thresholds (two-threshold for PLCs):")
-                            print(f"  0-cells ({self.threshold_percentile}%): {self.anomaly_threshold_0:.4f}")
-                            print(f"  1-cells ({self.threshold_percentile}%): {self.anomaly_threshold_1:.4f}")
-                            print(f"  2-cells Low ({self.plc_low_percentile}%): {self.anomaly_threshold_2_low:.4f}")
-                            print(f"  2-cells High ({self.plc_high_percentile}%): {self.anomaly_threshold_2_high:.4f}")
-                        else:
-                            self.anomaly_threshold_2 = np.percentile(error_per_sample_2.numpy(), self.threshold_percentile)
-                            print(f"Calibrated 3-level thresholds ({self.threshold_percentile}th percentile):")
-                            print(f"  0-cells: {self.anomaly_threshold_0:.4f}")
-                            print(f"  1-cells: {self.anomaly_threshold_1:.4f}")
-                            print(f"  2-cells: {self.anomaly_threshold_2:.4f}")
-                        
-                        print(f"DEBUG: Threshold calibration completed successfully")
-                    except Exception as e:
-                        print(f"ERROR: Failed to calculate thresholds: {e}")
-                        print(f"Error type: {type(e).__name__}")
-                        import traceback
-                        traceback.print_exc()
-                        return
+                    # Use original global threshold approach (default)
+                    error_per_sample_0 = torch.mean(all_residuals_0, dim=(1, 2))  # Average across components and features
+                    error_per_sample_1 = torch.mean(all_residuals_1, dim=(1, 2))
+                    error_per_sample_2 = torch.mean(all_residuals_2, dim=(1, 2))
+                    
+                    # Calculate global thresholds
+                    self.thresholds = {
+                        '0': torch.quantile(error_per_sample_0, self.threshold_percentile / 100.0).item(),
+                        '1': torch.quantile(error_per_sample_1, self.threshold_percentile / 100.0).item(),
+                        '2': torch.quantile(error_per_sample_2, self.threshold_percentile / 100.0).item()
+                    }
             else:
-                # For temporal mode, only use 0-cells
-                if self.threshold_method == "evt":
-                    # Per-component EVT thresholding for temporal mode
-                    self.evt_thresholds_0 = self._fit_evt_thresholds(all_residuals_0.squeeze(-1))
-                    print(f"Calibrated EVT thresholds for temporal mode:")
-                    print(f"  0-cells: {self.evt_thresholds_0.shape[0]} component-specific thresholds")
-                else:
-                    error_per_sample_0 = torch.mean(all_residuals_0.cpu(), dim=(1, 2))
-                    self.anomaly_threshold_0 = np.percentile(error_per_sample_0.numpy(), self.threshold_percentile)
-                    print(f"Calibrated 0-cell threshold: {self.anomaly_threshold_0:.4f}")
+                # Temporal mode - only level 0
+                error_per_sample_0 = torch.mean(all_residuals_0, dim=(1, 2))
+                self.thresholds = {
+                    '0': torch.quantile(error_per_sample_0, self.threshold_percentile / 100.0).item()
+                }
+                # Temporal thresholds computed
+        
+        # Calibration completed
 
     def _fit_evt_thresholds(self, residuals, q=0.99):
         """
@@ -591,8 +556,11 @@ class AnomalyTrainer:
                 if self.model.temporal_mode:
                     sample_device = self.to_device(sample)
                     x0_pred, _ = self.model(sample_device)
-                    # Use L2 loss consistently
-                    residuals_0 = self.crit(x0_pred, sample_device['target_x0'])
+                    # Use appropriate loss based on normalization method
+                    if self.use_robust_normalization:
+                        residuals_0 = self.crit_mae(x0_pred, sample_device['target_x0'])  # Use MAE for robust normalization
+                    else:
+                        residuals_0 = self.crit(x0_pred, sample_device['target_x0'])  # Use MSE for standard approach
                     
                     # Store reconstruction errors
                     batch_errors_0 = residuals_0.cpu().numpy()
@@ -623,7 +591,13 @@ class AnomalyTrainer:
                             batch_level_preds['level_1'].append(is_anomalous)  # Same for temporal mode
                             batch_level_preds['level_2'].append(is_anomalous)
                         else: # Simple threshold
-                            if self.threshold_method == "evt":
+                            if self.use_robust_normalization:
+                                # Use robust normalization (GDN/STADN approach) for temporal mode
+                                component_errors_tensor = torch.mean(residuals_0[i], dim=1)  # [n_components]
+                                normalized_errors = (component_errors_tensor - self.robust_stats['median_0']) / self.robust_stats['iqr_0']
+                                max_score = torch.max(normalized_errors).item()
+                                raw_anomaly = (max_score > self.thresholds['0']).item()
+                            elif self.threshold_method == "evt":
                                 # Per-component EVT thresholding for temporal mode
                                 component_errors = torch.mean(residuals_0[i], dim=1)  # [n_components]
                                 component_anomalies = component_errors > self.evt_thresholds_0
@@ -662,15 +636,25 @@ class AnomalyTrainer:
                     # Standard reconstruction
                     x_0_recon, x_1_recon, x_2_recon = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2, type_ids)
                     
-                    # Use L2 loss consistently for all levels
-                    # For categorical embeddings, only compute loss on original features (first 2 dimensions)
-                    if hasattr(self.model, 'use_categorical_embeddings') and self.model.use_categorical_embeddings:
-                        x_0_original = x_0[:, :, :2]  # Only normalized_value + first_order_diff
-                        residuals_0 = self.crit(x_0_recon, x_0_original)
+                    # Use appropriate loss based on normalization method
+                    if self.use_robust_normalization:
+                        # Use MAE for robust normalization
+                        if hasattr(self.model, 'use_categorical_embeddings') and self.model.use_categorical_embeddings:
+                            x_0_original = x_0[:, :, :2]  # Only normalized_value + first_order_diff
+                            residuals_0 = self.crit_mae(x_0_recon, x_0_original)
+                        else:
+                            residuals_0 = self.crit_mae(x_0_recon, x_0)
+                        residuals_1 = self.crit_mae(x_1_recon, x_1)
+                        residuals_2 = self.crit_mae(x_2_recon, x_2)
                     else:
-                        residuals_0 = self.crit(x_0_recon, x_0)
-                    residuals_1 = self.crit(x_1_recon, x_1)
-                    residuals_2 = self.crit(x_2_recon, x_2)
+                        # Use MSE for standard approach
+                        if hasattr(self.model, 'use_categorical_embeddings') and self.model.use_categorical_embeddings:
+                            x_0_original = x_0[:, :, :2]  # Only normalized_value + first_order_diff
+                            residuals_0 = self.crit(x_0_recon, x_0_original)
+                        else:
+                            residuals_0 = self.crit(x_0_recon, x_0)
+                        residuals_1 = self.crit(x_1_recon, x_1)
+                        residuals_2 = self.crit(x_2_recon, x_2)
                     
                     # Store reconstruction errors
                     batch_errors_0 = residuals_0.cpu().numpy()
@@ -688,66 +672,63 @@ class AnomalyTrainer:
                     
                     for i in range(residuals_0.shape[0]):
                         # Component-level errors (per sensor/actuator)
-                        component_errors = torch.mean(residuals_0[i], dim=1).cpu().numpy()
-                        batch_component_errors.append(component_errors)
+                        component_errors_0 = torch.mean(residuals_0[i], dim=1).cpu().numpy()  # [n_0cells]
+                        component_errors_1 = torch.mean(residuals_1[i], dim=1).cpu().numpy()  # [n_1cells]
+                        component_errors_2 = torch.mean(residuals_2[i], dim=1).cpu().numpy()  # [n_2cells]
+                        batch_component_errors.append(component_errors_0)
                         
-                        if self.evaluation_method == 'cusum':
-                            # For CUSUM, only use 0-cells
-                            residual_per_feature = torch.mean(residuals_0[i], dim=1)
-                            sensor_anomalies = self.cusum_detector.update(residual_per_feature)
-                            raw_anomaly = torch.any(sensor_anomalies).item()
-                            # Store raw prediction
-                            batch_preds_raw.append(raw_anomaly)
-                            # Apply temporal consistency for filtered prediction
-                            is_anomalous = self.apply_temporal_consistency(raw_anomaly)
-                            batch_preds.append(is_anomalous)
-                            batch_level_preds['level_0'].append(is_anomalous)
-                            batch_level_preds['level_1'].append(is_anomalous)  # Same for CUSUM
-                            batch_level_preds['level_2'].append(is_anomalous)
-                        else: # Multi-level threshold evaluation
-                            if self.threshold_method == "evt":
-                                # Per-component EVT thresholding for each level
-                                
-                                # Level 0: Per-component errors
-                                component_errors_0 = torch.mean(residuals_0[i], dim=1)  # [n_components]
-                                component_anomalies_0 = component_errors_0 > self.evt_thresholds_0
-                                is_anomalous_0 = torch.any(component_anomalies_0).item()
-                                
-                                # Level 1: Per-edge errors  
-                                edge_errors_1 = torch.mean(residuals_1[i], dim=1)  # [n_edges]
-                                edge_anomalies_1 = edge_errors_1 > self.evt_thresholds_1
-                                is_anomalous_1 = torch.any(edge_anomalies_1).item()
-                                
-                                # Level 2: Per-PLC errors
-                                plc_errors_2 = torch.mean(residuals_2[i], dim=1)  # [n_plcs]
-                                plc_anomalies_2 = plc_errors_2 > self.evt_thresholds_2
-                                is_anomalous_2 = torch.any(plc_anomalies_2).item()
-                                
+                        # Choose threshold method based on configuration
+                        if self.use_robust_normalization:
+                            # Use robust normalization (GDN/STADN approach)
+                            # Convert numpy arrays back to tensors for robust normalization
+                            component_errors_0_tensor = torch.tensor(component_errors_0, device=self.device)
+                            component_errors_1_tensor = torch.tensor(component_errors_1, device=self.device)
+                            component_errors_2_tensor = torch.tensor(component_errors_2, device=self.device)
+                            
+                            # Normalize using robust statistics
+                            normalized_0 = (component_errors_0_tensor - self.robust_stats['median_0']) / self.robust_stats['iqr_0']
+                            max_score_0 = torch.max(normalized_0).item()
+                            is_anomalous_0 = max_score_0 > self.thresholds['0']
+                            
+                            if self.robust_stats['median_1'] is not None:
+                                normalized_1 = (component_errors_1_tensor - self.robust_stats['median_1']) / self.robust_stats['iqr_1']
+                                max_score_1 = torch.max(normalized_1).item()
+                                is_anomalous_1 = max_score_1 > self.thresholds['1']
                             else:
-                                # Original single threshold per level
-                                error_0 = torch.mean(residuals_0[i])
-                                error_1 = torch.mean(residuals_1[i])
-                                error_2 = torch.mean(residuals_2[i])
+                                is_anomalous_1 = False
                                 
-                                is_anomalous_0 = (error_0 > self.anomaly_threshold_0).item()
-                                is_anomalous_1 = (error_1 > self.anomaly_threshold_1).item()
+                            if self.robust_stats['median_2'] is not None:
+                                normalized_2 = (component_errors_2_tensor - self.robust_stats['median_2']) / self.robust_stats['iqr_2']
+                                max_score_2 = torch.max(normalized_2).item()
+                                is_anomalous_2 = max_score_2 > self.thresholds['2']
+                            else:
+                                is_anomalous_2 = False
                                 
-                                if self.use_two_threshold_alarm:
-                                    is_high_plc_alarm = (error_2 > self.anomaly_threshold_2_high).item()
-                                    is_low_plc_alarm = (error_2 > self.anomaly_threshold_2_low).item()
-                                    is_anomalous_2 = is_high_plc_alarm or (is_low_plc_alarm and (is_anomalous_0 or is_anomalous_1))
-                                else:
-                                    is_anomalous_2 = (error_2 > self.anomaly_threshold_2).item()
-
-                            batch_level_preds['level_0'].append(is_anomalous_0)
-                            batch_level_preds['level_1'].append(is_anomalous_1)
-                            batch_level_preds['level_2'].append(is_anomalous_2)
+                        elif hasattr(self, 'use_component_thresholds') and self.use_component_thresholds and hasattr(self, 'component_thresholds_0'):
+                            # Use per-component thresholds
+                            is_anomalous_0 = np.any(component_errors_0 > self.component_thresholds_0).item()
+                            is_anomalous_1 = np.any(component_errors_1 > self.component_thresholds_1).item()
+                            is_anomalous_2 = np.any(component_errors_2 > self.component_thresholds_2).item()
+                        else:
+                            # Use global thresholds (default approach)
+                            error_0 = torch.mean(residuals_0[i])
+                            error_1 = torch.mean(residuals_1[i])
+                            error_2 = torch.mean(residuals_2[i])
                             
-                            raw_anomaly = is_anomalous_0 or is_anomalous_1 or is_anomalous_2
-                            batch_preds_raw.append(raw_anomaly)
-                            is_anomalous = self.apply_temporal_consistency(raw_anomaly)
-                            batch_preds.append(is_anomalous)
-                            
+                            is_anomalous_0 = (error_0 > self.thresholds['0']).item()
+                            is_anomalous_1 = (error_1 > self.thresholds['1']).item()
+                            is_anomalous_2 = (error_2 > self.thresholds['2']).item()
+                        
+                        # Apply temporal consistency and store predictions
+                        raw_anomaly = is_anomalous_0 or is_anomalous_1 or is_anomalous_2
+                        batch_preds_raw.append(raw_anomaly)
+                        is_anomalous = self.apply_temporal_consistency(raw_anomaly)
+                        batch_preds.append(is_anomalous)
+                        
+                        batch_level_preds['level_0'].append(is_anomalous_0)
+                        batch_level_preds['level_1'].append(is_anomalous_1)
+                        batch_level_preds['level_2'].append(is_anomalous_2)
+                    
                     all_y_pred.extend(batch_preds)
                     all_y_pred_raw.extend(batch_preds_raw)
                     detailed_predictions.extend(batch_preds)
@@ -858,33 +839,41 @@ class AnomalyTrainer:
             level_preds = np.array(detailed_level_predictions[level])
             level_metrics[level] = calculate_standard_metrics(all_y_true, level_preds)
 
-        # Log results to console
-        print("\n--- Evaluation Results ---")
-        print(f"=== WITHOUT Temporal Consistency (Raw Predictions) ===")
-        print(f"Standard Precision: {standard_metrics_raw['precision']:.4f}")
-        print(f"Standard Recall:    {standard_metrics_raw['recall']:.4f}")
-        print(f"Standard F1-Score:  {standard_metrics_raw['f1']:.4f}")
-        print(f"Scenario Detection Rate: {scenario_detection_rate_raw:.4f} ({int(scenario_detection_rate_raw*len(attacks))}/{len(attacks)})")
-        print(f"False Positive Alarms:   {fp_alarm_count_raw}")
-        print(f"eTaP (Time-Aware Precision): {time_aware_metrics_raw['eTaP']:.4f}")
-        print(f"eTaR (Time-Aware Recall):    {time_aware_metrics_raw['eTaR']:.4f}")
-        print(f"eTaF1 (Time-Aware F1):       {time_aware_metrics_raw['eTaF1']:.4f}")
-        print("-" * 50)
-        print(f"=== WITH Temporal Consistency (temporal_consistency={self.temporal_consistency}) ===")
-        print(f"Standard Precision: {standard_metrics['precision']:.4f}")
-        print(f"Standard Recall:    {standard_metrics['recall']:.4f}")
-        print(f"Standard F1-Score:  {standard_metrics['f1']:.4f}")
-        print(f"Scenario Detection Rate: {scenario_detection_rate:.4f} ({int(scenario_detection_rate*len(attacks))}/{len(attacks)})")
-        print(f"False Positive Alarms:   {fp_alarm_count}")
-        print(f"eTaP (Time-Aware Precision): {time_aware_metrics['eTaP']:.4f}")
-        print(f"eTaR (Time-Aware Recall):    {time_aware_metrics['eTaR']:.4f}")
-        print(f"eTaF1 (Time-Aware F1):       {time_aware_metrics['eTaF1']:.4f}")
-        print("-" * 50)
-        print("Multi-Level Detection Results:")
-        for i, level in enumerate(['level_0', 'level_1', 'level_2']):
-            level_name = self.level_names[i] if i < len(self.level_names) else f'Level_{i}'
-            print(f"{level_name} - P: {level_metrics[level]['precision']:.4f}, R: {level_metrics[level]['recall']:.4f}, F1: {level_metrics[level]['f1']:.4f}")
-        print("--------------------------\n")
+        # Log results to console - simplified for USENIX reviewers when wandb is disabled
+        if WANDB_AVAILABLE and wandb.run is not None:
+            # Full detailed output when wandb is active
+            print("\n--- Evaluation Results ---")
+            print(f"=== WITHOUT Temporal Consistency (Raw Predictions) ===")
+            print(f"Standard Precision: {standard_metrics_raw['precision']:.4f}")
+            print(f"Standard Recall:    {standard_metrics_raw['recall']:.4f}")
+            print(f"Standard F1-Score:  {standard_metrics_raw['f1']:.4f}")
+            print(f"Scenario Detection Rate: {scenario_detection_rate_raw:.4f} ({int(scenario_detection_rate_raw*len(attacks))}/{len(attacks)})")
+            print(f"False Positive Alarms:   {fp_alarm_count_raw}")
+            print(f"eTaP (Time-Aware Precision): {time_aware_metrics_raw['eTaP']:.4f}")
+            print(f"eTaR (Time-Aware Recall):    {time_aware_metrics_raw['eTaR']:.4f}")
+            print(f"eTaF1 (Time-Aware F1):       {time_aware_metrics_raw['eTaF1']:.4f}")
+            print("-" * 50)
+            print(f"=== WITH Temporal Consistency (temporal_consistency={self.temporal_consistency}) ===")
+            print(f"Standard Precision: {standard_metrics['precision']:.4f}")
+            print(f"Standard Recall:    {standard_metrics['recall']:.4f}")
+            print(f"Standard F1-Score:  {standard_metrics['f1']:.4f}")
+            print(f"Scenario Detection Rate: {scenario_detection_rate:.4f} ({int(scenario_detection_rate*len(attacks))}/{len(attacks)})")
+            print(f"False Positive Alarms:   {fp_alarm_count}")
+            print(f"eTaP (Time-Aware Precision): {time_aware_metrics['eTaP']:.4f}")
+            print(f"eTaR (Time-Aware Recall):    {time_aware_metrics['eTaR']:.4f}")
+            print(f"eTaF1 (Time-Aware F1):       {time_aware_metrics['eTaF1']:.4f}")
+            print("-" * 50)
+            print("Multi-Level Detection Results:")
+            for i, level in enumerate(['level_0', 'level_1', 'level_2']):
+                level_name = self.level_names[i] if i < len(self.level_names) else f'Level_{i}'
+                print(f"{level_name} - P: {level_metrics[level]['precision']:.4f}, R: {level_metrics[level]['recall']:.4f}, F1: {level_metrics[level]['f1']:.4f}")
+            print("--------------------------\n")
+        else:
+            # Simplified output 
+            print(f"\n--- Test Results ---")
+            print(f"Precision: {standard_metrics['precision']:.4f}")
+            print(f"Recall:    {standard_metrics['recall']:.4f}")
+            print(f"F1-Score:  {standard_metrics['f1']:.4f}")
         
         final_results = {
             # Filtered predictions (with temporal consistency)
@@ -913,7 +902,8 @@ class AnomalyTrainer:
         
         # Log to wandb if active
         if wandb.run:
-            wandb.log(final_results)
+            if WANDB_AVAILABLE and wandb.run is not None:
+                wandb.log(final_results)
             
         return final_results
 
@@ -994,7 +984,7 @@ class AnomalyTrainer:
         plt.tight_layout()
         
         # Log to wandb
-        if wandb.run:
+        if WANDB_AVAILABLE and wandb.run is not None:
             wandb.log({"detection_timeline": wandb.Image(fig)})
             print("Detection timeline logged to wandb")
         
@@ -1051,7 +1041,8 @@ class AnomalyTrainer:
             "overall_attack_detection_rate": np.sum(predictions[ground_truth == 1]) / np.sum(ground_truth) if np.sum(ground_truth) > 0 else 0
         }
         
-        print(f"Processing {len(attacks)} individual attacks...")
+        if WANDB_AVAILABLE and wandb.run is not None:
+            print(f"Processing {len(attacks)} individual attacks...")
         
         for attack_idx, attack_range in enumerate(attacks):
             if len(attack_range) < 2:
@@ -1155,14 +1146,15 @@ class AnomalyTrainer:
                 attack_precision, attack_recall, attack_f1, level_detection_rates
             )
             
-            # Print individual attack results
-            print(f"Attack {attack_idx}: P={attack_precision:.3f}, R={attack_recall:.3f}, F1={attack_f1:.3f}")
-            print(f"  Components: {attacked_components}")
-            print(f"  Multi-level detection rates: Nodes={level_detection_rates.get('level_0', 0):.3f}, "
-                  f"Edges={level_detection_rates.get('level_1', 0):.3f}, PLCs={level_detection_rates.get('level_2', 0):.3f}")
+            # Print individual attack results (only when wandb is active)
+            if WANDB_AVAILABLE and wandb.run is not None:
+                print(f"Attack {attack_idx}: P={attack_precision:.3f}, R={attack_recall:.3f}, F1={attack_f1:.3f}")
+                print(f"  Components: {attacked_components}")
+                print(f"  Multi-level detection rates: Nodes={level_detection_rates.get('level_0', 0):.3f}, "
+                      f"Edges={level_detection_rates.get('level_1', 0):.3f}, PLCs={level_detection_rates.get('level_2', 0):.3f}")
         
         # Log all attack-specific metrics to wandb
-        if wandb.run:
+        if WANDB_AVAILABLE and wandb.run is not None:
             wandb.log(wandb_attack_summary)
             print(f"Logged individual attack analysis for {len(attacks)} attacks to wandb")
             
@@ -1352,11 +1344,12 @@ class AnomalyTrainer:
         plt.tight_layout()
         
         # Log to wandb
-        if wandb.run:
+        if WANDB_AVAILABLE and wandb.run is not None:
             wandb.log({f"attack_{attack_idx}_analysis": wandb.Image(fig)})
         
         plt.close(fig)
-        print(f"Created enhanced visualization for Attack {attack_idx} with detection performance overlay")
+        if WANDB_AVAILABLE and wandb.run is not None:
+            print(f"Created enhanced visualization for Attack {attack_idx} with detection performance overlay")
 
     def train(self, num_epochs=10, test_interval=1, checkpoint_dir="model_checkpoints", 
               early_stopping=True, patience=3, min_delta=1e-4):
@@ -1395,7 +1388,8 @@ class AnomalyTrainer:
 
             # Log training loss to wandb
             if wandb.run:
-                wandb.log({"epoch": epoch + 1, "train_loss": train_loss})
+                if WANDB_AVAILABLE and wandb.run is not None:
+                    wandb.log({"epoch": epoch + 1, "train_loss": train_loss})
 
             if (epoch + 1) % test_interval == 0:
                 # Evaluate on test data
@@ -1408,7 +1402,10 @@ class AnomalyTrainer:
                     test_f1 = 0.0
                     test_results['f1'] = 0.0
                 
-                print(f"Epoch {epoch+1} Test F1: {test_f1:.4f} (Loss: {train_loss:.6f})")
+                # Enhanced console output for artifact evaluation
+                test_precision = test_results.get('precision', 0.0)
+                test_recall = test_results.get('recall', 0.0)
+                print(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {train_loss:.6f} | Test - P: {test_precision:.4f} R: {test_recall:.4f} F1: {test_f1:.4f}")
 
                 # Log test metrics to wandb with epoch number
                 if wandb.run:
@@ -1424,7 +1421,8 @@ class AnomalyTrainer:
                         "test_scenario_detection_rate": test_results['scenario_detection_rate'],
                         "test_fp_alarms": test_results['fp_alarms']
                     }
-                    wandb.log(epoch_metrics)
+                    if WANDB_AVAILABLE and wandb.run is not None:
+                        wandb.log(epoch_metrics)
                     print(f"Logged epoch {epoch+1} metrics to wandb")
 
                 if test_f1 - best_f1 > min_delta:
@@ -1454,11 +1452,25 @@ class AnomalyTrainer:
         
         final_results = self.evaluate(self.test_dataloader, "Final Test")
         
-        # Create detection timeline visualization
-        self.create_detection_timeline_visualization()
+        # Create detection timeline visualization and analyze individual attacks only with wandb
+        if WANDB_AVAILABLE and wandb.run is not None:
+            self.create_detection_timeline_visualization()
+            self.analyze_individual_attacks()
+        else:
+            print("wandb not active. proceeding without wandb.")
         
-        # Analyze individual attacks
-        self.analyze_individual_attacks()
+        
+        # Final results summary for artifact evaluation
+        if final_results:
+            print("\n" + "="*60)
+            print("FINAL RESULTS SUMMARY")
+            print("="*60)
+            print(f"Precision: {final_results.get('precision', 0.0):.4f}")
+            print(f"Recall:    {final_results.get('recall', 0.0):.4f}")
+            print(f"F1-Score:  {final_results.get('f1', 0.0):.4f}")
+            if 'auc' in final_results:
+                print(f"AUC:       {final_results.get('auc', 0.0):.4f}")
+            print("="*60)
         
         return final_results 
 
@@ -1585,3 +1597,365 @@ class AnomalyTrainer:
             print("Logged residuals as wandb artifact")
         
         return residuals_path 
+
+    def calibrate_per_component_thresholds(self):
+        """
+        Calibrate separate thresholds for each component instead of per-cell-type.
+        This helps with MinMax normalization where different components have different error distributions.
+        """
+        print("Calibrating per-component thresholds...")
+        
+        self.model.eval()
+        all_residuals_0 = []
+        all_residuals_1 = []
+        all_residuals_2 = []
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(self.validation_dataloader):
+                if batch_idx % 1000 == 0:
+                    print(f"Processing calibration batch {batch_idx}")
+                
+                # Extract features and topology
+                if isinstance(batch, (list, tuple)):
+                    x_0, x_1, x_2, a0, a1, coa2, b1, b2, _ = batch  # Ignore label for calibration
+                else:
+                    x_0 = batch['x_0']
+                    x_1 = batch['x_1'] 
+                    x_2 = batch['x_2']
+                    a0 = batch['a0']
+                    a1 = batch['a1']
+                    coa2 = batch['coa2']
+                    b1 = batch['b1']
+                    b2 = batch['b2']
+                
+                # Move to device
+                x_0 = x_0.float().to(self.device)
+                x_1 = x_1.float().to(self.device)
+                x_2 = x_2.float().to(self.device)
+                a0 = a0.to(self.device)
+                a1 = a1.to(self.device)
+                coa2 = coa2.to(self.device)
+                b1 = b1.to(self.device)
+                b2 = b2.to(self.device)
+                
+                # DEBUG: Check dtypes before forward pass
+                if batch_idx == 0:
+                    print(f"DEBUG: Feature dtypes - x_0: {x_0.dtype}, x_1: {x_1.dtype}, x_2: {x_2.dtype}")
+                    print(f"DEBUG: Adjacency dtypes - a0: {a0.dtype}, a1: {a1.dtype}, coa2: {coa2.dtype}")
+                    print(f"DEBUG: Incidence dtypes - b1: {b1.dtype}, b2: {b2.dtype}")
+                
+                # Forward pass
+                recon_x0, recon_x1, recon_x2 = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2)
+                
+                # Compute residuals
+                residuals_0 = self.crit(recon_x0, x_0)  # [batch, n_0cells, feat_dim]
+                residuals_1 = self.crit(recon_x1, x_1)  # [batch, n_1cells, feat_dim] 
+                residuals_2 = self.crit(recon_x2, x_2)  # [batch, n_2cells, feat_dim]
+                
+                all_residuals_0.append(residuals_0)
+                all_residuals_1.append(residuals_1)
+                all_residuals_2.append(residuals_2)
+        
+        # Concatenate all residuals
+        all_residuals_0 = torch.cat(all_residuals_0, dim=0)  # [total_samples, n_0cells, feat_dim]
+        all_residuals_1 = torch.cat(all_residuals_1, dim=0)  # [total_samples, n_1cells, feat_dim]
+        all_residuals_2 = torch.cat(all_residuals_2, dim=0)  # [total_samples, n_2cells, feat_dim]
+        
+        print(f"Per-component calibration data shapes:")
+        print(f"  0-cells: {all_residuals_0.shape}")
+        print(f"  1-cells: {all_residuals_1.shape}")
+        print(f"  2-cells: {all_residuals_2.shape}")
+        
+        # Calculate per-component thresholds
+        self.component_thresholds_0 = []
+        self.component_thresholds_1 = []
+        self.component_thresholds_2 = []
+        
+        # For 0-cells: each component gets its own threshold
+        for comp_idx in range(all_residuals_0.shape[1]):
+            comp_errors = all_residuals_0[:, comp_idx, :].mean(dim=1)  # Average across feature dimensions
+            threshold = torch.quantile(comp_errors, self.threshold_percentile / 100.0)
+            self.component_thresholds_0.append(threshold.item())
+            print(f"  0-cell component {comp_idx}: threshold = {threshold.item():.6f} (mean_error = {comp_errors.mean().item():.6f})")
+        
+        # For 1-cells: each edge gets its own threshold
+        for edge_idx in range(all_residuals_1.shape[1]):
+            edge_errors = all_residuals_1[:, edge_idx, :].mean(dim=1)
+            threshold = torch.quantile(edge_errors, self.threshold_percentile / 100.0)
+            self.component_thresholds_1.append(threshold.item())
+            if edge_idx < 5:  # Only print first few
+                print(f"  1-cell edge {edge_idx}: threshold = {threshold.item():.6f} (mean_error = {edge_errors.mean().item():.6f})")
+        
+        # For 2-cells: each PLC gets its own threshold
+        for plc_idx in range(all_residuals_2.shape[1]):
+            plc_errors = all_residuals_2[:, plc_idx, :].mean(dim=1)
+            threshold = torch.quantile(plc_errors, self.threshold_percentile / 100.0)
+            self.component_thresholds_2.append(threshold.item())
+            print(f"  2-cell PLC {plc_idx}: threshold = {threshold.item():.6f} (mean_error = {plc_errors.mean().item():.6f})")
+        
+        print(f"Per-component threshold calibration completed successfully")
+        print(f"  Total 0-cell components: {len(self.component_thresholds_0)}")
+        print(f"  Total 1-cell edges: {len(self.component_thresholds_1)}")
+        print(f"  Total 2-cell PLCs: {len(self.component_thresholds_2)}")
+
+    def evaluate_with_per_component_thresholds(self, dataloader=None, eval_mode="Test"):
+        """
+        Evaluate using per-component thresholds instead of global thresholds.
+        """
+        if not hasattr(self, 'component_thresholds_0'):
+            print("ERROR: Per-component thresholds not calibrated. Run calibrate_per_component_thresholds() first.")
+            return None
+            
+        if dataloader is None:
+            dataloader = self.test_dataloader
+            
+        print(f"--- Evaluating with Per-Component Thresholds on {eval_mode} Data ---")
+        
+        self.model.eval()
+        all_predictions = []
+        all_labels = []
+        all_errors_0 = []
+        all_errors_1 = []
+        all_errors_2 = []
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(dataloader):
+                if batch_idx % 5000 == 0:
+                    print(f"Processing evaluation batch {batch_idx}")
+                
+                # Extract features and topology
+                if isinstance(batch, (list, tuple)):
+                    x_0, x_1, x_2, a0, a1, coa2, b1, b2, labels = batch
+                else:
+                    x_0 = batch['x_0']
+                    x_1 = batch['x_1'] 
+                    x_2 = batch['x_2']
+                    a0 = batch['a0']
+                    a1 = batch['a1']
+                    coa2 = batch['coa2']
+                    b1 = batch['b1']
+                    b2 = batch['b2']
+                    labels = batch['label']
+                
+                # Move to device
+                x_0 = x_0.float().to(self.device)
+                x_1 = x_1.float().to(self.device)
+                x_2 = x_2.float().to(self.device)
+                a0 = a0.to(self.device)
+                a1 = a1.to(self.device)
+                coa2 = coa2.to(self.device)
+                b1 = b1.to(self.device)
+                b2 = b2.to(self.device)
+                labels = labels.to(self.device)
+                
+                # Forward pass
+                recon_x0, recon_x1, recon_x2 = self.model(x_0, x_1, x_2, a0, a1, coa2, b1, b2)
+                
+                # Compute per-component errors
+                residuals_0 = self.crit(recon_x0, x_0)  # [batch, n_0cells, feat_dim]
+                residuals_1 = self.crit(recon_x1, x_1)  # [batch, n_1cells, feat_dim] 
+                residuals_2 = self.crit(recon_x2, x_2)  # [batch, n_2cells, feat_dim]
+                
+                # Average across feature dimensions
+                errors_0 = residuals_0.mean(dim=2)  # [batch, n_0cells]
+                errors_1 = residuals_1.mean(dim=2)  # [batch, n_1cells]
+                errors_2 = residuals_2.mean(dim=2)  # [batch, n_2cells]
+                
+                # Check each component against its individual threshold
+                batch_predictions = []
+                for sample_idx in range(errors_0.shape[0]):
+                    # Check if ANY component exceeds its threshold
+                    sample_anomaly_0 = torch.any(errors_0[sample_idx] > torch.tensor(self.component_thresholds_0, device=errors_0.device))
+                    sample_anomaly_1 = torch.any(errors_1[sample_idx] > torch.tensor(self.component_thresholds_1, device=errors_1.device))
+                    sample_anomaly_2 = torch.any(errors_2[sample_idx] > torch.tensor(self.component_thresholds_2, device=errors_2.device))
+                    
+                    # Sample is anomalous if ANY level detects anomaly
+                    sample_anomaly = sample_anomaly_0 or sample_anomaly_1 or sample_anomaly_2
+                    batch_predictions.append(sample_anomaly.item())
+                
+                all_predictions.extend(batch_predictions)
+                all_labels.extend(labels.cpu().numpy())
+                all_errors_0.append(errors_0.cpu())
+                all_errors_1.append(errors_1.cpu())
+                all_errors_2.append(errors_2.cpu())
+        
+        # Convert to numpy arrays
+        all_predictions = np.array(all_predictions)
+        all_labels = np.array(all_labels)
+        all_errors_0 = torch.cat(all_errors_0, dim=0).numpy()
+        all_errors_1 = torch.cat(all_errors_1, dim=0).numpy()
+        all_errors_2 = torch.cat(all_errors_2, dim=0).numpy()
+        
+        # Calculate metrics
+        precision, recall, f1, _ = precision_recall_fscore_support(all_labels, all_predictions, average='binary', zero_division=0)
+        
+        print(f"Per-Component Threshold Results:")
+        print(f"  Precision: {precision:.4f}")
+        print(f"  Recall: {recall:.4f}")
+        print(f"  F1-Score: {f1:.4f}")
+        print(f"  Total samples: {len(all_predictions)}")
+        print(f"  Predicted anomalies: {np.sum(all_predictions)}")
+        print(f"  True anomalies: {np.sum(all_labels)}")
+        
+        return {
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'predictions': all_predictions,
+            'labels': all_labels,
+            'errors_0': all_errors_0,
+            'errors_1': all_errors_1,
+            'errors_2': all_errors_2
+        }
+
+    def _calibrate_robust_normalization(self, residuals_0, residuals_1, residuals_2):
+        """
+        Calibrate robust normalization using median and IQR (GDN/STADN approach).
+        
+        This method implements the robust normalization described in GDN and STADN papers:
+        1. Calculate median and IQR for each component's prediction errors (using MAE)
+        2. Normalize errors using: ai(t) = (Erri(t) - median_i) / IQR_i
+        3. Use max aggregation: A(t) = max_i ai(t)
+        4. Set threshold based on validation set max scores
+        
+        Parameters:
+        residuals_0, residuals_1, residuals_2: torch.Tensor of prediction errors for each level (MAE-based)
+        """
+        print("Calibrating robust normalization using median and IQR (MAE-based residuals)...")
+        
+        # Calculate per-component statistics for each level
+        # residuals shape: [n_samples, n_components, n_features]
+        # We average across features to get per-component errors
+        
+        # Level 0 (0-cells / sensors)
+        component_errors_0 = torch.mean(residuals_0, dim=2)  # [n_samples, n_components]
+        print(f"DEBUG: Component errors 0 shape: {component_errors_0.shape}")
+        
+        # Calculate median and IQR for each component
+        median_0 = torch.median(component_errors_0, dim=0)[0]  # [n_components]
+        q75_0 = torch.quantile(component_errors_0, 0.75, dim=0)  # [n_components]
+        q25_0 = torch.quantile(component_errors_0, 0.25, dim=0)  # [n_components]
+        iqr_0 = q75_0 - q25_0  # [n_components]
+        
+        # Add small epsilon to avoid division by zero
+        # Use median as fallback when IQR is zero (constant components)
+        iqr_0 = torch.where(iqr_0 > 1e-8, iqr_0, median_0 * 0.1)  # Use 10% of median as IQR for constant components
+        
+        # Store statistics
+        self.robust_stats['median_0'] = median_0
+        self.robust_stats['iqr_0'] = iqr_0
+        
+        print(f"DEBUG: Level 0 robust stats - median range: [{median_0.min().item():.6f}, {median_0.max().item():.6f}]")
+        print(f"DEBUG: Level 0 robust stats - IQR range: [{iqr_0.min().item():.6f}, {iqr_0.max().item():.6f}]")
+        
+        # Level 1 (1-cells / edges)
+        if residuals_1 is not None:
+            component_errors_1 = torch.mean(residuals_1, dim=2)  # [n_samples, n_edges]
+            print(f"DEBUG: Component errors 1 shape: {component_errors_1.shape}")
+            
+            median_1 = torch.median(component_errors_1, dim=0)[0]  # [n_edges]
+            q75_1 = torch.quantile(component_errors_1, 0.75, dim=0)  # [n_edges]
+            q25_1 = torch.quantile(component_errors_1, 0.25, dim=0)  # [n_edges]
+            iqr_1 = q75_1 - q25_1  # [n_edges]
+            # Use median as fallback when IQR is zero (constant components)
+            iqr_1 = torch.where(iqr_1 > 1e-8, iqr_1, median_1 * 0.1)  # Use 10% of median as IQR for constant components
+            
+            self.robust_stats['median_1'] = median_1
+            self.robust_stats['iqr_1'] = iqr_1
+            
+            print(f"DEBUG: Level 1 robust stats - median range: [{median_1.min().item():.6f}, {median_1.max().item():.6f}]")
+            print(f"DEBUG: Level 1 robust stats - IQR range: [{iqr_1.min().item():.6f}, {iqr_1.max().item():.6f}]")
+        
+        # Level 2 (2-cells / subsystems)
+        if residuals_2 is not None:
+            component_errors_2 = torch.mean(residuals_2, dim=2)  # [n_samples, n_subsystems]
+            print(f"DEBUG: Component errors 2 shape: {component_errors_2.shape}")
+            
+            median_2 = torch.median(component_errors_2, dim=0)[0]  # [n_subsystems]
+            q75_2 = torch.quantile(component_errors_2, 0.75, dim=0)  # [n_subsystems]
+            q25_2 = torch.quantile(component_errors_2, 0.25, dim=0)  # [n_subsystems]
+            iqr_2 = q75_2 - q25_2  # [n_subsystems]
+            # Use median as fallback when IQR is zero (constant components)
+            iqr_2 = torch.where(iqr_2 > 1e-8, iqr_2, median_2 * 0.1)  # Use 10% of median as IQR for constant components
+            
+            self.robust_stats['median_2'] = median_2
+            self.robust_stats['iqr_2'] = iqr_2
+            
+            print(f"DEBUG: Level 2 robust stats - median range: [{median_2.min().item():.6f}, {median_2.max().item():.6f}]")
+            print(f"DEBUG: Level 2 robust stats - IQR range: [{iqr_2.min().item():.6f}, {iqr_2.max().item():.6f}]")
+        
+        # Calculate normalized scores for validation set to set threshold
+        print("Calculating normalized scores for threshold calibration...")
+        
+        # Normalize all validation errors using robust statistics
+        normalized_scores_0 = (component_errors_0 - median_0.unsqueeze(0)) / iqr_0.unsqueeze(0)  # [n_samples, n_components]
+        
+        # Take max across components for each sample (max aggregation)
+        max_scores_0 = torch.max(normalized_scores_0, dim=1)[0]  # [n_samples]
+        
+        # Set threshold based on percentile of max scores
+        threshold_0 = torch.quantile(max_scores_0, self.robust_threshold_percentile / 100.0).item()
+        
+        self.thresholds = {'0': threshold_0}
+        
+        # Add thresholds for other levels if available
+        if residuals_1 is not None:
+            normalized_scores_1 = (component_errors_1 - median_1.unsqueeze(0)) / iqr_1.unsqueeze(0)
+            max_scores_1 = torch.max(normalized_scores_1, dim=1)[0]
+            threshold_1 = torch.quantile(max_scores_1, self.robust_threshold_percentile / 100.0).item()
+            self.thresholds['1'] = threshold_1
+            
+        if residuals_2 is not None:
+            normalized_scores_2 = (component_errors_2 - median_2.unsqueeze(0)) / iqr_2.unsqueeze(0)
+            max_scores_2 = torch.max(normalized_scores_2, dim=1)[0]
+            threshold_2 = torch.quantile(max_scores_2, self.robust_threshold_percentile / 100.0).item()
+            self.thresholds['2'] = threshold_2
+        
+        print(f"Robust normalization thresholds ({self.robust_threshold_percentile}th percentile):")
+        for level, threshold in self.thresholds.items():
+            print(f"  {level}-cells: {threshold:.4f}")
+        
+        # Debug: Print some statistics about the normalized scores
+        print(f"DEBUG: Normalized scores 0 - mean: {normalized_scores_0.mean().item():.4f}, std: {normalized_scores_0.std().item():.4f}")
+        print(f"DEBUG: Max scores 0 - mean: {max_scores_0.mean().item():.4f}, std: {max_scores_0.std().item():.4f}")
+        print(f"DEBUG: Max scores 0 - range: [{max_scores_0.min().item():.4f}, {max_scores_0.max().item():.4f}]")
+    
+    def save_artifacts(self, checkpoint_dir, final_results):
+        """Save essential artifacts for USENIX evaluation."""
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        # Save key metrics in simple format
+        metrics = {
+            'precision': final_results.get('precision', 0.0),
+            'recall': final_results.get('recall', 0.0), 
+            'f1': final_results.get('f1', 0.0)
+        }
+        
+        # Only add AUC and threshold if they have meaningful values
+        auc_value = final_results.get('auc', 0.0)
+        if auc_value > 0.0:
+            metrics['auc'] = auc_value
+            
+        threshold_value = getattr(self, 'threshold', 0.0)
+        if threshold_value > 0.0:
+            metrics['threshold'] = threshold_value
+        
+        # Save to JSON for easy reading
+        import json
+        with open(os.path.join(checkpoint_dir, 'metrics.json'), 'w') as f:
+            json.dump(metrics, f, indent=2)
+        
+        # Save full results as pickle
+        with open(os.path.join(checkpoint_dir, 'full_results.pkl'), 'wb') as f:
+            pickle.dump(final_results, f)
+        
+        # Save model if available
+        if hasattr(self, 'model'):
+            torch.save(self.model.state_dict(), os.path.join(checkpoint_dir, 'model.pth'))
+        
+        print(f"Artifacts saved to {checkpoint_dir}:")
+        print(f"  - metrics.json: Key performance metrics")  
+        print(f"  - full_results.pkl: Complete results")
+        print(f"  - model.pth: Trained model weights")
+        
+        return metrics

@@ -1,4 +1,4 @@
-# TopoDetect: A Topological Deep Learning Framework for Anomaly Detection in ICS Networks
+# TMS-ICS: Topology Meets Security - ICS Intrusion Detection via Topological Deep Learning
 
 This research project implements a novel approach to anomaly detection in industrial control systems using topological deep learning techniques. The system is evaluated on the SWAT (Secure Water Treatment), WADI (Water Distribution), and TEP (Tennessee Eastman Process) datasets.
 
@@ -64,11 +64,18 @@ python -c "import torch; print(f'CUDA device: {torch.cuda.get_device_name(0)}')"
 - If CUDA versions don't match, adjust the `cu###` suffix accordingly
 - For compilation issues, you may also need: `sudo apt install cmake ninja-build`
 
-### Weights & Biases Setup
+### Optional: Weights & Biases Setup
 
-The project uses [Weights & Biases (wandb)](https://wandb.ai) for experiment tracking and logging.
+The project can optionally use [Weights & Biases (wandb)](https://wandb.ai) for experiment tracking and visualization.
 
-**Setup wandb account:**
+**To run WITHOUT wandb (recommended for quick testing):**
+- Set `use_wandb: false` in your config file
+- The system will run normally and show results in the console
+
+**To enable wandb logging (optional):**
+<details>
+<summary>Click to expand wandb setup instructions</summary>
+
 1. Create a free account at [wandb.ai](https://wandb.ai)
 2. Get your API key from [wandb.ai/settings](https://wandb.ai/settings)
 3. Login to wandb:
@@ -76,17 +83,10 @@ The project uses [Weights & Biases (wandb)](https://wandb.ai) for experiment tra
 wandb login
 # Enter your API key when prompted
 ```
+4. Update the `entity` field in your config files to your wandb username
+5. Set `use_wandb: true` in your config file
 
-**Configure wandb entity:**
-- Update the `entity` field in your config files (`config.yaml`, `config_tep.yaml`, etc.)
-- Set it to your wandb username or team name
-
-**Running without wandb account:**
-If you don't have a wandb account, you can run in offline mode:
-```bash
-wandb offline
-python main.py --config config_tep.yaml
-```
+</details>
 
 Alternatively, you can install all dependencies using:
 
@@ -97,24 +97,42 @@ Ensure you install the correct PyTorch version for your system (CPU or GPU). See
 
 ## Datasets
 
-The project supports three industrial control system datasets:
+**⚠️ IMPORTANT: Two most important datasets require formal request and approval before use.**
+
+The project supports three industrial control system datasets. **Before running any experiments, you must request and obtain the datasets as described below:**
 
 ### SWAT (Secure Water Treatment)
-- Files: `SWATv0_train.csv`, `SWATv0_test.csv`
-- Location: `data/SWAT/`
+**Request dataset from:** https://itrust.sutd.edu.sg/itrust-labs_datasets/dataset_info/
+
+**Setup instructions:** See [`data/SWAT/README.md`](data/SWAT/README.md) for detailed processing steps.
+
+**Final files needed:**
+- `data/SWAT/SWATv0_train.csv`
+- `data/SWAT/SWATv0_test.csv`
 - 51 sensors and actuators across 6 process stages
 
 ### WADI (Water Distribution)
-- Files: `WADI_train.csv`, `WADI_test.csv`
-- Location: `data/WADI/`
+**Request dataset from:** https://itrust.sutd.edu.sg/itrust-labs_datasets/dataset_info/
+
+**Setup instructions:** See [`data/WADI/README.md`](data/WADI/README.md) for detailed processing steps.
+
+**Final files needed:**
+- `data/WADI/WADI_train.csv`
+- `data/WADI/WADI_test.csv`
 - 127 sensors and actuators across 5 subsystems
 
 ### TEP (Tennessee Eastman Process)
-- Files: `TEP_train.csv`, `TEP_test_cons_p2s_s1.csv`
-- Location: `data/TEP/`
+**Dataset source:** https://kilthub.cmu.edu/articles/dataset/Dataset_of_Manipulations_on_the_Tennessee_Eastman_Process/23805552
+
+**Setup instructions:** See [`data/TEP/README.md`](data/TEP/README.md) for detailed information about the simulator and data generation.
+
+**Final files needed:**
+- `data/TEP/TEP_train.csv`
+- `data/TEP/TEP_test_cons_p2s_s1.csv`
 - 53 sensors and actuators in chemical process simulation
 
-Each dataset should be placed in its respective directory as specified in the configuration file.
+---
+**Note:** All datasets must be properly requested, approved, and processed before running experiments. The exact filenames and locations above are required for the code to work correctly.
 
 ## Usage
 
@@ -128,9 +146,20 @@ python main.py --config config.yaml
 # Run WADI experiment
 python main.py --config config_wadi.yaml
 
-# Run TEP experiment (when implemented)
+# Run TEP experiment
 python main.py --config config_tep.yaml
 ```
+
+## USENIX Artifact Evaluation
+
+**For USENIX Security artifact evaluation, see [`ARTIFACT.md`](ARTIFACT.md)**
+
+This file contains detailed instructions for:
+- Quick functionality testing (5 minutes)  
+- Paper results reproduction (Table I)
+- Dataset setup and configuration
+- Expected outputs and troubleshooting
+
 
 The configuration file centralizes all hyperparameters and settings for the experiment, including:
 - System settings (device, checkpoint directory)
@@ -179,7 +208,7 @@ TDS_ICS_project/
 
 ## Model Architecture
 
-TopoDetect uses a Combinatorial Complex Attention Neural Network (AnomalyCCANN) with:
+TMS-ICS uses a Combinatorial Complex Attention Neural Network (AnomalyCCANN) with:
 - HMC layers for message passing across different topological dimensions (0-cells, 1-cells, 2-cells)
 - An encoder-decoder architecture for anomaly detection
 - Component-level anomaly localization capability

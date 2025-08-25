@@ -1,0 +1,80 @@
+# TMS-ICS Quick Test - 1% of data for fast testing
+# Based on swat_attack_detection_features_geco_10p.yaml
+
+seed: 42
+
+project_name: "SWAT_TopoDetect"
+entity: "avdalovica"
+experiment_name: "tms_ics_swat_quick_test"
+dataset_name: "SWAT"
+
+# System configuration
+system:
+  device: "cuda"
+  checkpoint_dir: "checkpoints"
+
+# Data configuration - 1% SAMPLE FOR QUICK TEST
+data:
+  data_dir: "data/SWAT"
+  train_path: "SWATv0_train.csv"
+  test_path: "SWATv0_test.csv"
+  sample_rate: 0.01  # 1% for quick test
+  validation_split_ratio: 0.2
+  temporal_mode: false
+  temporal_sample_rate: 1
+  normalization_method: "mixed_normalization"  # Z-norm for sensors, min-max for actuators
+  use_enhanced_2cell_features: true  # Enable specific features
+  use_first_order_differences: true  # Enable for better temporal detection
+  use_first_order_differences_edges: false
+  use_attack_detection_features: true  # Enable better features
+
+# Topology configuration - GECO RELATIONSHIPS AND FEATURES
+topology:
+  use_geco_relationships: true   # Use GECO-learned relationships
+  use_geco_features: true        # Enable enhanced edge features with GECO info
+  use_pure_embedding: false      # NO pure embedding
+
+# Model configuration - ENHANCED ATTACK DETECTION FEATURES + GECO
+model:
+  name: "AnomalyCCANN"
+  channels_per_layer:
+    - [[1, 6, 12], [32, 32, 32], [64, 64, 64]]  # 6D GECO edge features, 12D enhanced attack detection features
+  original_feature_dims:
+    "0": 1   # 0-cells: 1D normalized values
+    "1": 6   # 1-cells: 2D concatenated values + 4D GECO features
+    "2": 12  # 2-cells: 12D enhanced attack detection features
+  use_enhanced_decoders: false  # Disable for testing
+
+# Training configuration
+training:
+  epochs: 1
+  batch_size: 64  # Standard batch size
+  learning_rate: 0.001  # Standard learning rate
+  weight_decay: 1e-4
+  grad_clip_value: 1.0
+  test_interval: 1
+  early_stopping:
+    enabled: true
+    patience: 5
+    min_delta: 1e-4
+
+# Anomaly detection
+anomaly_detection:
+  threshold_method: "percentile"  # Use simple percentile
+  threshold_percentile: 99.0  
+  evaluation_method: "threshold"
+  use_two_threshold_alarm: false
+  temporal_consistency: 3
+
+# Evaluation
+evaluation:
+  metrics: ["f1", "precision", "recall"]
+  save_predictions: true
+  save_reconstruction_errors: true
+
+# Logging - NO WANDB FOR REVIEWERS
+logging:
+  use_wandb: false
+  log_interval: 5
+  save_model: true
+  verbose: true

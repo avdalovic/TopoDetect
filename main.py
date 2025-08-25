@@ -57,16 +57,23 @@ def main(args):
         raise ValueError(f"Unknown model name: {model_name}")
 
     # --- Start Experiment ---
-    wandb.init(
-        project=config.get('project_name', 'default-project'),
-        entity=config.get('entity'),
-        name=config.get('experiment_name', 'default-experiment'),
-        config=config
-    )
+    use_wandb = config.get('logging', {}).get('use_wandb', True)
+    
+    if use_wandb:
+        wandb.init(
+            project=config.get('project_name', 'default-project'),
+            entity=config.get('entity'),
+            name=config.get('experiment_name', 'default-experiment'),
+            config=config
+        )
+    else:
+        # Disable wandb
+        os.environ['WANDB_MODE'] = 'disabled'
     
     run_experiment(config)
 
-    wandb.finish()
+    if use_wandb:
+        wandb.finish()
 
 if __name__ == '__main__':
     # Add a check for the config file to prevent errors

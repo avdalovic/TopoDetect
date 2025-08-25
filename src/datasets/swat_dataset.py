@@ -90,13 +90,7 @@ class SWaTDataset(Dataset):
             np.random.seed(seed)
             torch.manual_seed(seed)
         
-        print(f"Using normalization method: {normalization_method}")
-        print(f"Using enhanced 2-cell features: {use_enhanced_2cell_features}")
-        print(f"Using first-order differences (0-cells): {use_first_order_differences}")
-        print(f"Using first-order differences (1-cells): {use_first_order_differences_edges}")
-        print(f"Using flow balance features (PLCs): {use_flow_balance_features}")
-        if seed is not None:
-            print(f"Using seed: {seed}")
+        # Configuration loaded silently
         
         # Set feature dimensions based on configuration
         # Determine actual 0-cell feature dimension based on normalization method and first-order differences
@@ -110,7 +104,6 @@ class SWaTDataset(Dataset):
         # Add first-order differences dimension if enabled for 0-cells
         if self.use_first_order_differences:
             actual_feature_dim_0 = base_feature_dim_0 + 1  # Add 1D for first-order difference
-            print(f"0-cell feature dimension increased from {base_feature_dim_0}D to {actual_feature_dim_0}D (added first-order differences)")
         else:
             actual_feature_dim_0 = base_feature_dim_0
             
@@ -132,10 +125,8 @@ class SWaTDataset(Dataset):
         # Add first-order differences for 1-cells if enabled
         if self.use_first_order_differences_edges:
             self.feature_dim_1 = base_1cell_dim + 1  # Add 1D for edge first-order differences
-            print(f"Using 1-cell features with differences: {self.feature_dim_1}D")
         else:
             self.feature_dim_1 = base_1cell_dim
-            print(f"Using 1-cell features without differences: {self.feature_dim_1}D")
         
         # Override the feature_dim_0 for consistency
         self.feature_dim_0 = actual_feature_dim_0
@@ -143,15 +134,12 @@ class SWaTDataset(Dataset):
         # Set 2-cell feature dimensions
         if use_attack_detection_features:
             self.feature_dim_2 = 12  # 12D enhanced attack detection features
-            print(f"Using enhanced attack detection 2-cell features: {self.feature_dim_2}D")
         else:
             base_2cell_dim = 4 if use_enhanced_2cell_features else 1
             if use_flow_balance_features:
                 self.feature_dim_2 = base_2cell_dim + 1  # Add 1D for flow balance
-                print(f"Using 2-cell features with flow balance: {self.feature_dim_2}D")
             else:
                 self.feature_dim_2 = base_2cell_dim
-                print(f"Using standard 2-cell features: {self.feature_dim_2}D")
         
         # Process data and create features
         self.preprocess_features()
@@ -198,9 +186,6 @@ class SWaTDataset(Dataset):
         Preprocess raw features to create feature vectors based on normalization method.
         Includes first-order differences if enabled.
         """
-        print(f"Computing 0-cell features with normalization method: {self.normalization_method}")
-        if self.use_first_order_differences:
-            print("Including first-order differences (lag-1) in features")
         
         if self.normalization_method == "standard":
             return self._compute_standard_x0()
@@ -232,8 +217,6 @@ class SWaTDataset(Dataset):
         # Initialize tensor for 0-cell features
         features = torch.zeros((num_samples, num_components, self.feature_dim_0))
 
-        print("Preprocessing features using standard method...")
-        
         # Track which indices are actuators for later
         actuator_indices = []
         
@@ -271,8 +254,7 @@ class SWaTDataset(Dataset):
             # Standardize: (x - mean) / std
             features[:, i, 0] = (values - sensor_means[idx]) / sensor_stds[idx]
         
-        print(f"Normalized sensor features, mean: {sensor_means.mean():.4f}, std: {sensor_stds.mean():.4f}")
-        print(f"Computed 0-cell features shape: {features.shape}")
+        # Features computed
         
         return features
 
@@ -284,9 +266,7 @@ class SWaTDataset(Dataset):
         num_samples = len(self.data)
         num_components = len(self.columns)
         
-        print("Preprocessing features using mixed normalization (z-norm for sensors, min-max for actuators)...")
-        if self.use_first_order_differences:
-            print("Computing first-order differences (current_value - previous_value)")
+        # Mixed normalization processing
 
         # Initialize tensor for 0-cell features (1D or 2D based on first-order differences)
         features = torch.zeros((num_samples, num_components, self.feature_dim_0))
@@ -304,12 +284,9 @@ class SWaTDataset(Dataset):
                 if range_val == 0:
                     # If all values are the same, keep the original constant value
                     normalized_values = np.full_like(values, max_val, dtype=float)
-                    print(f"  {col} (actuator): constant value={min_val:.4f}, kept as-is")
                 else:
                     # Min-max normalize: (x - min) / (max - min)
                     normalized_values = (values - min_val) / range_val
-                    if i < 3:  # Only print details for first few components
-                        print(f"  {col} (actuator): min={min_val:.4f}, max={max_val:.4f}, range={range_val:.4f}")
                 
                 # Store normalized values in first dimension
                 features[:, i, 0] = torch.tensor(normalized_values, dtype=torch.float)
@@ -324,11 +301,6 @@ class SWaTDataset(Dataset):
                     
                     # Store first-order differences in second dimension
                     features[:, i, 1] = torch.tensor(first_order_diffs, dtype=torch.float)
-                    
-                    if i < 3:  # Debug info for first few components
-                        diff_mean = np.mean(np.abs(first_order_diffs[1:]))  # Exclude first sample for mean
-                        diff_max = np.max(np.abs(first_order_diffs))
-                        print(f"    First-order diff: mean_abs={diff_mean:.6f}, max_abs={diff_max:.6f}")
                 
             else:
                 # For sensors: z-normalization
@@ -338,9 +310,6 @@ class SWaTDataset(Dataset):
                 # Z-normalize: (x - mean) / std
                 normalized_values = (values - mean_val) / std_val
                 features[:, i, 0] = torch.tensor(normalized_values, dtype=torch.float)
-                
-                if i < 3:  # Only print details for first few components
-                    print(f"  {col} (sensor): mean={mean_val:.4f}, std={std_val:.4f}")
                 
                 # Compute first-order differences if enabled
                 if self.use_first_order_differences:
@@ -352,16 +321,8 @@ class SWaTDataset(Dataset):
                     
                     # Store first-order differences in second dimension
                     features[:, i, 1] = torch.tensor(first_order_diffs, dtype=torch.float)
-                    
-                    if i < 3:  # Debug info for first few components
-                        diff_mean = np.mean(np.abs(first_order_diffs[1:]))  # Exclude first sample for mean
-                        diff_max = np.max(np.abs(first_order_diffs))
-                        print(f"    First-order diff: mean_abs={diff_mean:.6f}, max_abs={diff_max:.6f}")
                         
-        print(f"Computed 0-cell features shape: {features.shape}")
-        if self.use_first_order_differences:
-            print(f"  Dimension 0: Normalized values")
-            print(f"  Dimension 1: First-order differences (lag-1)")
+        # Features computed
         
         return features
 
@@ -373,9 +334,7 @@ class SWaTDataset(Dataset):
         num_samples = len(self.data)
         num_components = len(self.columns)
 
-        print("Preprocessing features using z-normalization for both sensors and actuators...")
-        if self.use_first_order_differences:
-            print("Computing first-order differences (current_value - previous_value)")
+        # Z-normalization processing
 
         # Initialize tensor for 0-cell features (1D or 2D based on first-order differences)
         features = torch.zeros((num_samples, num_components, self.feature_dim_0))
@@ -391,11 +350,6 @@ class SWaTDataset(Dataset):
             normalized_values = (values - mean_val) / std_val
             features[:, i, 0] = torch.tensor(normalized_values, dtype=torch.float)
             
-            if i < 5:  # Only print first 5 for brevity
-                print(f"  {col}: mean={mean_val:.4f}, std={std_val:.4f}")
-            elif i == 5:
-                print(f"  ... (suppressing further normalization details)")
-            
             # Compute first-order differences if enabled
             if self.use_first_order_differences:
                 # Calculate lag-1 differences: current - previous
@@ -406,16 +360,8 @@ class SWaTDataset(Dataset):
                 
                 # Store first-order differences in second dimension
                 features[:, i, 1] = torch.tensor(first_order_diffs, dtype=torch.float)
-                
-                if i < 3:  # Debug info for first few components
-                    diff_mean = np.mean(np.abs(first_order_diffs[1:]))  # Exclude first sample for mean
-                    diff_max = np.max(np.abs(first_order_diffs))
-                    print(f"    First-order diff: mean_abs={diff_mean:.6f}, max_abs={diff_max:.6f}")
         
-        print(f"Computed 0-cell features shape: {features.shape}")
-        if self.use_first_order_differences:
-            print(f"  Dimension 0: Z-normalized values")
-            print(f"  Dimension 1: First-order differences (lag-1)")
+        # Features computed
             
         return features
 
@@ -463,9 +409,7 @@ class SWaTDataset(Dataset):
         This method implements the standard ML practice of fitting scaler on training data only.
         Optionally includes first-order differences as additional features.
         """
-        print("Preprocessing features using Proper MinMax normalization (MinMaxScaler approach)...")
-        if self.use_first_order_differences:
-            print("Computing first-order differences (current_value - previous_value)")
+        # MinMax normalization processing
             
         num_samples = len(self.data)
         num_components = len(self.columns)
@@ -562,9 +506,7 @@ class SWaTDataset(Dataset):
         This method implements the standard ML practice of fitting scaler on training data only.
         Optionally includes first-order differences as additional features.
         """
-        print("Preprocessing features using Proper Z-normalization (StandardScaler approach)...")
-        if self.use_first_order_differences:
-            print("Computing first-order differences (current_value - previous_value)")
+        # Z-normalization processing
             
         num_samples = len(self.data)
         num_components = len(self.columns)
@@ -663,7 +605,7 @@ class SWaTDataset(Dataset):
         """
         Robust Z-normalization that handles constants and extreme values.
         """
-        print("Preprocessing features using Robust Z-normalization...")
+        # Robust Z-normalization processing
         num_samples = len(self.data)
         num_components = len(self.columns)
 
