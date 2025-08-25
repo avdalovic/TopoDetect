@@ -130,9 +130,8 @@ The project supports three industrial control system datasets. **Before running 
 - `data/TEP/TEP_train.csv`
 - `data/TEP/TEP_test_cons_p2s_s1.csv`
 - 53 sensors and actuators in chemical process simulation
+- Additional manipulations can be used if needed.
 
----
-**Note:** All datasets must be properly requested, approved, and processed before running experiments. The exact filenames and locations above are required for the code to work correctly.
 
 ## Usage
 
@@ -140,19 +139,18 @@ The main entry point for all experiments is `main.py`. The behavior of the scrip
 
 **Basic Usage:**
 ```bash
-# Run SWAT experiment
-python main.py --config config.yaml
+# Activate environment
+conda activate topox
 
-# Run WADI experiment
-python main.py --config config_wadi.yaml
+# Quick functionality test (1% data, 1 epochs, ~5 minutes)
+python main.py --config configs/tms_ics_swat_quick.yaml
 
-# Run TEP experiment
-python main.py --config config_tep.yaml
 ```
 
-## USENIX Artifact Evaluation
 
-**For USENIX Security artifact evaluation, see [`ARTIFACT.md`](ARTIFACT.md)**
+## Artifact Evaluation
+
+**For artifact evaluation, see [`ARTIFACT.md`](ARTIFACT.md)**
 
 This file contains detailed instructions for:
 - Quick functionality testing (5 minutes)  
@@ -167,7 +165,7 @@ The configuration file centralizes all hyperparameters and settings for the expe
 - Model architecture (layer configurations, temporal mode)
 - Training parameters (learning rate, batch size, epochs)
 - Anomaly detection logic (thresholding methods)
-- `wandb` logging details (project, entity, experiment name)
+
 
 You can create different `.yaml` files in the `configs/` directory to define various experiments.
 
