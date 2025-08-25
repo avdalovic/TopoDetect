@@ -152,11 +152,11 @@ python main.py --config configs/tms_ics_swat_quick.yaml
 
 **For artifact evaluation, see [`ARTIFACT.md`](ARTIFACT.md)**
 
-This file contains detailed instructions for:
-- Quick functionality testing (5 minutes)  
-- Paper results reproduction (Table I)
-- Dataset setup and configuration
-- Expected outputs and troubleshooting
+This repository provides:
+- **Runnable scripts** for our TMS-ICS method results reproduction
+- **Pre-calculated files** for localization experiments (`localization_map.txt`) to reduce evaluation time
+- **Baseline comparisons** available through existing published artifacts
+- Quick functionality testing (5 minutes) and full paper results reproduction
 
 
 The configuration file centralizes all hyperparameters and settings for the experiment, including:
